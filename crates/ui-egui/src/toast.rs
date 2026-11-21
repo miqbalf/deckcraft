@@ -30,6 +30,10 @@ pub fn missing_fonts_message(fonts: &[String]) -> Option<String> {
 
 /// Toast the active presentation's missing fonts, once per opened document.
 pub fn note_missing_fonts(app: &mut SlideApp) {
+    // Fonts the page is sending may be the ones missing: say nothing until they are in.
+    if app.host_fonts_coming {
+        return;
+    }
     let Some(d) = app.session.active() else { return };
     if !app.fonts_noted.insert(d.uid) {
         return;

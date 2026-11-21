@@ -1,6 +1,6 @@
 use super::{
     FilePlace, FilePurpose, FileTarget, InboxEvent, LocatedPlace, PendingFile, RECENT_MAX, SlideApp, Target, UiRequest, Value, ViewMode, dialogs,
-    json, media,
+    host_saves, json, media,
 };
 
 #[derive(Default)]
@@ -525,14 +525,21 @@ impl SlideApp {
             (None, Some(own)) => (own, false),
             (ext, _) => (format!("{}.{}", d.title(), ext.unwrap_or("deckcraft")), true),
         };
+        // A page that answers each save gets an id; the presentation counts as saved when it says so.
+        let id = self.services.host_saves.confirms().then(|| self.services.host_saves.next_id());
+        let (uid, doc) = (d.uid, d.doc.clone());
         let saved = save_bytes(&d.doc, format_for_path(&name)).map_err(|e| e.to_string()).and_then(|bytes| {
             let host = self.services.host_save.as_mut().ok_or("no page to save to")?;
-            host(&name, &bytes, save_as).map_err(|e| format!("Couldn't save {name}: {e}"))?;
-            mark_saved(&mut self.session, Some(name.clone())).map_err(|e| e.to_string())
+            host(&name, &bytes, save_as, id.as_deref()).map_err(|e| format!("Couldn't save {name}: {e}"))?;
+            if let Some(id) = &id {
+                self.pending_host_saves.push(host_saves::PendingHostSave { id: id.clone(), uid, doc, name: name.clone() });
+                return Ok(true);
+            }
+            mark_saved(&mut self.session, Some(name.clone())).map(|()| false).map_err(|e| e.to_string())
         });
         match saved {
-            Ok(()) => {
-                self.set_status(format!("Saved {name}"));
+            Ok(waiting) => {
+                self.set_status(if waiting { format!("Saving {name}") } else { format!("Saved {name}") });
                 Ok(name)
             }
             Err(e) => {

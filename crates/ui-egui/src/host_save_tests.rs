@@ -19,7 +19,7 @@ fn host_app(fail: bool) -> (SlideApp, Got) {
     let got: Got = Rc::default();
     let (saves, downloads) = (got.clone(), got.clone());
     let services = Services {
-        host_save: Some(Box::new(move |name: &str, bytes: &[u8], save_as: bool| {
+        host_save: Some(Box::new(move |name: &str, bytes: &[u8], save_as: bool, _: Option<&str>| {
             if fail {
                 return Err("the page is gone".into());
             }

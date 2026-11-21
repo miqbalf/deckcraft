@@ -458,7 +458,7 @@ fn ctrl_w_asks_before_closing_unsaved_changes() {
 fn host_close_prompt_keeps_the_presentation_when_the_save_fails() {
     for fail in [true, false] {
         let services = Services {
-            host_save: Some(Box::new(move |_: &str, _: &[u8], _: bool| if fail { Err("the page is gone".into()) } else { Ok(()) })),
+            host_save: Some(Box::new(move |_: &str, _: &[u8], _: bool, _: Option<&str>| if fail { Err("the page is gone".into()) } else { Ok(()) })),
             download: Some(Box::new(|_: &str, _: &[u8]| {})),
             ..Default::default()
         };
@@ -489,7 +489,7 @@ fn host_save_as_under_the_same_name_returns_to_the_slide() {
     let got: Rc<RefCell<Vec<(String, bool)>>> = Default::default();
     let saves = got.clone();
     let services = Services {
-        host_save: Some(Box::new(move |name: &str, _: &[u8], save_as: bool| {
+        host_save: Some(Box::new(move |name: &str, _: &[u8], save_as: bool, _: Option<&str>| {
             saves.borrow_mut().push((name.to_string(), save_as));
             Ok(())
         })),

@@ -11,9 +11,85 @@ pub type OpenAsyncFn = Box<dyn FnMut(&str, u64)>;
 
 pub type DownloadFn = Box<dyn FnMut(&str, &[u8])>;
 
-/// [`Services::host_save`]: `(file name, bytes, save_as)`. An error means the page didn't get
-/// the file, and the save failed.
-pub type HostSaveFn = Box<dyn FnMut(&str, &[u8], bool) -> Result<(), String>>;
+/// [`Services::host_save`]: `(file name, bytes, save_as, id)`. An error means the page didn't get
+/// the file, and the save failed. `id` is set when the page stores saves and answers each one
+/// ([`HostSaves::confirms`]): it names the save its `saved` or `save-failed` answers.
+pub type HostSaveFn = Box<dyn FnMut(&str, &[u8], bool, Option<&str>) -> Result<(), String>>;
+
+/// What a page that answers saves said about one that carried an id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostAnswer {
+    /// Stored; `name` is set when the page kept it under another name (a conflict copy, Save As).
+    Saved { id: String, name: Option<String> },
+    /// Not stored.
+    Failed { id: String, error: String },
+}
+
+#[derive(Default)]
+struct HostSavesState {
+    confirms: bool,
+    next: u64,
+    /// Ids of copies (exports, Print) handed over: their failure is shown, their success needs nothing.
+    copies: Vec<String>,
+    answers: Vec<HostAnswer>,
+}
+
+/// What the page framing the app tells it about saves, shared between the web shell's listener and
+/// the app (a cheap clone): whether it stores saves (the page's `saves`), and its answers, which
+/// the app reads each frame.
+#[derive(Clone, Default)]
+pub struct HostSaves(std::sync::Arc<std::sync::Mutex<HostSavesState>>);
+
+impl HostSaves {
+    fn with<R>(&self, f: impl FnOnce(&mut HostSavesState) -> R) -> R {
+        f(&mut self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+
+    /// The page said it stores saves and answers each.
+    pub fn set_confirms(&self) {
+        self.with(|s| s.confirms = true);
+    }
+
+    pub fn confirms(&self) -> bool {
+        self.with(|s| s.confirms)
+    }
+
+    /// A new id for a save about to be handed to the page.
+    pub fn next_id(&self) -> String {
+        self.with(|s| {
+            s.next += 1;
+            format!("save-{}", s.next)
+        })
+    }
+
+    /// An id for a copy (export, Print) about to be handed over, when the page answers saves.
+    pub fn copy_id(&self) -> Option<String> {
+        self.confirms().then(|| {
+            let id = self.next_id();
+            self.with(|s| s.copies.push(id.clone()));
+            id
+        })
+    }
+
+    pub fn answer(&self, answer: HostAnswer) {
+        self.with(|s| s.answers.push(answer));
+    }
+
+    pub(crate) fn take_answers(&self) -> Vec<HostAnswer> {
+        self.with(|s| std::mem::take(&mut s.answers))
+    }
+
+    /// Whether `id` named a copy still waiting for its answer (it is not waiting after this).
+    pub(crate) fn finish_copy(&self, id: &str) -> bool {
+        self.with(|s| match s.copies.iter().position(|c| c == id) {
+            Some(at) => {
+                s.copies.remove(at);
+                true
+            }
+            None => false,
+        })
+    }
+}
 
 /// A file the host finished reading for the request `id` from [`SlideApp::begin_external_file`].
 #[derive(Clone, Debug)]
@@ -62,6 +138,9 @@ pub struct Services {
     /// presentation is then that file, and the next Save goes to it. Exports and Print still go
     /// through `download`, which the host also points at the page: they are copies.
     pub host_save: Option<HostSaveFn>,
+    /// Whether the page stores saves and answers each, and its answers ([`HostSaves`]). The
+    /// presentation then counts as saved only when the page's `saved` for that save arrives.
+    pub host_saves: HostSaves,
     pub inbox: Option<Inbox>,
     /// Image on the system clipboard (PNG bytes), when the host can read one.
     pub clipboard_image: Option<Box<dyn FnMut() -> Option<Vec<u8>>>>,

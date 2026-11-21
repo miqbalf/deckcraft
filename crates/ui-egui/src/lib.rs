@@ -72,7 +72,7 @@ pub use panels::notes;
 pub use panels::selpane;
 pub use panels::thumbs;
 pub use ribbon::qat;
-pub use services::{DownloadFn, HostSaveFn, Inbox, InboxEvent, InboxFile, OpenAsyncFn, PickFn, ReadFn, Services, WriteFn};
+pub use services::{DownloadFn, HostAnswer, HostSaveFn, HostSaves, Inbox, InboxEvent, InboxFile, OpenAsyncFn, PickFn, ReadFn, Services, WriteFn};
 use state::{FilePlace, FilePurpose, ImeDescriptorKey, ImeDestination, ImeTerminalStamp};
 pub use state::{RECENT_MAX, UiState, ViewMode, ZOOM_RANGE};
 
@@ -339,6 +339,10 @@ pub struct SlideApp {
     /// The empty presentation host mode starts with ([`SlideApp::start_for_host`]), until the
     /// first file the page sends takes its place.
     host_start: Option<u64>,
+    /// Saves handed to a page that answers each, waiting for its answer (`app::host_saves`).
+    pending_host_saves: Vec<app::host_saves::PendingHostSave>,
+    /// The page framing the app is sending fonts that are still arriving ([`SlideApp::host_fonts_coming`]).
+    host_fonts_coming: bool,
     /// Owner/generation/cause bookkeeping for the canvas text IME producer.
     ime_tracker: egui::ime_context::ImeContextTracker,
     /// Canvas IME geometry for this pass: the caret while editing, or the selected shape.

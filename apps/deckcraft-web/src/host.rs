@@ -26,6 +26,14 @@
 //!     now that file; the next Save sends its name with `false`.
 //!   - Export (PDF, pictures, outline, GIF, handouts, a Save As type that isn't a presentation)
 //!     and Print: `false`. They are copies; the presentation's file stays the same.
+//! - `deckcraft:host` with `saves: true` (from the host): the host stores saves and answers each.
+//!   `deckcraft:save` then carries an `id` (for exports and Print too), the presentation counts as
+//!   saved only on `deckcraft:saved { id, name? }` (a `name` is its file from then on: a conflict
+//!   copy, Save As), and on `deckcraft:save-failed { id, error }` it stays unsaved with "Couldn't
+//!   save to Nextcloud: {error}". Without `saves` nothing changes: a file handed over counts as
+//!   saved at once.
+//! - `deckcraft:fonts { fonts: [{name, url}] }` (from the host): each same-origin font file is
+//!   fetched and installed like a font the user added; the missing-font notice waits for them.
 //! - `deckcraft:dirty` whenever unsaved changes appear or go away, `deckcraft:failed` when the
 //!   app couldn't start or refused a file of 2 GiB or larger.
 //!
@@ -36,8 +44,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use craft_web_host::web::{FileData, Host, Message};
-use deckcraft_ui_egui::{Services, SlideApp};
+use craft_web_host::web::{FileData, Host, Message, fetch_font};
+use deckcraft_ui_egui::{HostAnswer, HostSaves, Services, SlideApp};
 
 /// The app id in the host messages (`deckcraft:ready`).
 const APP: &str = "deckcraft";
@@ -54,9 +62,20 @@ const MAX_OPEN_BYTES: f64 = 2_147_483_648.0;
 /// The longest user name taken from `?author=` (the preferences' own limit).
 const MAX_AUTHOR_CHARS: usize = 256;
 
+/// What the host's `fonts` message leaves for the next frame.
+enum FontEvent {
+    /// Fonts are being fetched (true), or all arrived or failed (false).
+    Coming(bool),
+    /// A fetched font file.
+    File(Vec<u8>),
+}
+
 #[derive(Clone)]
 pub struct Bridge {
     host: Rc<Host>,
+    /// Whether the host stores saves and answers each, and its answers (shared with the app).
+    saves: HostSaves,
+    fonts: Rc<RefCell<Vec<FontEvent>>>,
     /// Files the host sent (the name, if it sent one), waiting for the next frame.
     opened: Rc<RefCell<Vec<(Option<String>, Vec<u8>)>>>,
 }
@@ -71,20 +90,28 @@ impl Bridge {
         if host.mode() == craft_web_host::Mode::Parent && web_sys::window()?.location().origin().ok()? == "null" {
             return None;
         }
-        Some(Self { host: Rc::new(host), opened: Rc::default() })
+        Some(Self { host: Rc::new(host), saves: HostSaves::default(), fonts: Rc::default(), opened: Rc::default() })
     }
 
     /// Hand saved and exported files to the host instead of downloading them, and hear the files
     /// it sends.
     pub fn connect(&self, services: &mut Services, ctx: egui::Context) {
         self.listen(ctx);
+        // The app and the listener share one answer queue.
+        services.host_saves = self.saves.clone();
         let bridge = self.clone();
-        services.host_save = Some(Box::new(move |name: &str, bytes: &[u8], save_as: bool| bridge.post_save(name, bytes, save_as)));
-        // Exports and Print are copies.
+        services.host_save =
+            Some(Box::new(move |name: &str, bytes: &[u8], save_as: bool, id: Option<&str>| bridge.post_save(name, bytes, save_as, id)));
+        // Exports and Print are copies: the host answers them too, so a failure is shown.
         let bridge = self.clone();
         services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
-            if let Err(e) = bridge.post_save(name, bytes, false) {
+            let id = bridge.saves.copy_id();
+            if let Err(e) = bridge.post_save(name, bytes, false, id.as_deref()) {
                 log::error!("couldn't hand {name} to the page: {e}");
+                if let Some(id) = id {
+                    // No answer will come: say so now.
+                    bridge.saves.answer(HostAnswer::Failed { id, error: e });
+                }
             }
         }));
     }
@@ -106,6 +133,21 @@ impl Bridge {
         let _ = self.host.post_failed(error, None);
     }
 
+    /// Before each frame: fonts the host's files may need go in first.
+    pub fn install_fonts(&self, app: &mut SlideApp) {
+        let events = std::mem::take(&mut *self.fonts.borrow_mut());
+        for event in events {
+            match event {
+                FontEvent::Coming(coming) => app.host_fonts_coming(coming),
+                FontEvent::File(bytes) => {
+                    if app.install_host_font(bytes) == 0 {
+                        log::warn!("a host font was not a font DeckCraft can read, or was already there");
+                    }
+                }
+            }
+        }
+    }
+
     /// Before each frame: open the files the host sent.
     pub fn open_files(&self, app: &mut SlideApp) {
         let opened = std::mem::take(&mut *self.opened.borrow_mut());
@@ -120,17 +162,32 @@ impl Bridge {
         self.host.post_dirty(app.session.documents().iter().any(|d| d.is_dirty()));
     }
 
-    fn post_save(&self, path: &str, bytes: &[u8], save_as: bool) -> Result<(), String> {
+    fn post_save(&self, path: &str, bytes: &[u8], save_as: bool, id: Option<&str>) -> Result<(), String> {
         let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
-        self.host.post_save(&name, bytes, None, save_as)
+        self.host.post_save(&name, bytes, id, save_as)
     }
 
     /// Hear `deckcraft:open` and queue the file for the next frame.
     fn listen(&self, ctx: egui::Context) {
         let opened = self.opened.clone();
         let host = self.host.clone();
+        let saves = self.saves.clone();
+        let fonts = self.fonts.clone();
         self.host.listen(move |message| {
-            let Message::Open { name, data } = message else { return };
+            let (name, data) = match message {
+                Message::Open { name, data } => (name, data),
+                Message::Host { saves: true, .. } => return saves.set_confirms(),
+                Message::Saved { id, name } => {
+                    saves.answer(HostAnswer::Saved { id, name });
+                    return ctx.request_repaint();
+                }
+                Message::SaveFailed { id, error } => {
+                    saves.answer(HostAnswer::Failed { id, error });
+                    return ctx.request_repaint();
+                }
+                Message::Fonts { fonts: list } => return fetch_fonts(list, fonts.clone(), ctx.clone()),
+                _ => return,
+            };
             if data.size() >= MAX_OPEN_BYTES {
                 log::warn!("host file {name} is 2 GiB or larger; not opened");
                 let _ = host.post_failed(&format!("{name} is 2 GiB or larger, which DeckCraft's web build cannot open"), None);
@@ -146,4 +203,25 @@ impl Bridge {
             ctx.request_repaint();
         });
     }
+}
+
+/// Fetch each font a host offered (one at a time, same-origin only, size-capped by the bridge) and
+/// leave its bytes for the next frame; a failure is logged and skipped.
+fn fetch_fonts(list: Vec<craft_web_host::FontRef>, events: Rc<RefCell<Vec<FontEvent>>>, ctx: egui::Context) {
+    if list.is_empty() {
+        return;
+    }
+    events.borrow_mut().push(FontEvent::Coming(true));
+    ctx.request_repaint();
+    wasm_bindgen_futures::spawn_local(async move {
+        for font in list {
+            match fetch_font(&font).await {
+                Ok(bytes) => events.borrow_mut().push(FontEvent::File(bytes)),
+                Err(e) => log::warn!("host font {} not fetched: {e}", font.name),
+            }
+            ctx.request_repaint();
+        }
+        events.borrow_mut().push(FontEvent::Coming(false));
+        ctx.request_repaint();
+    });
 }

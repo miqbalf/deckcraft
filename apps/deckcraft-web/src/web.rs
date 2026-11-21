@@ -128,6 +128,7 @@ impl eframe::App for WebShell {
     /// page sent first and telling it about unsaved changes after.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(bridge) = &self.bridge {
+            bridge.install_fonts(&mut self.app);
             bridge.open_files(&mut self.app);
         }
         self.app.logic(ctx);

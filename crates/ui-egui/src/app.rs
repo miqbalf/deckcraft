@@ -15,6 +15,7 @@ mod commands;
 mod control;
 pub(crate) mod files;
 mod frame;
+pub(crate) mod host_saves;
 mod ime;
 mod input;
 mod keys;
@@ -108,6 +109,8 @@ impl SlideApp {
             next_file_id: 1,
             pending_files: Vec::new(),
             host_start: None,
+            pending_host_saves: Vec::new(),
+            host_fonts_coming: false,
             ime_tracker: egui::ime_context::ImeContextTracker::new(),
             ime_pending: None,
             ime_frame_viewport: None,
@@ -235,6 +238,7 @@ impl SlideApp {
             // Inbox results are host file bytes and do not need fonts or a painted frame. A
             // window that starts hidden must still apply a file picked before its first UI pass.
             self.drain_inbox();
+            self.poll_host_saves();
         }
         self.drain_screenshots();
         // `raw_input_hook` ran before this logic pass. This is normally a no-op now that
