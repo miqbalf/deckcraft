@@ -1,7 +1,6 @@
 //! The same `.pptx` bytes import to the same ids, in one process and across threads, whatever the
 //! hasher state. The live seed (L3) depends on this: two peers importing the base bytes must agree
 //! on every slide, shape, layout, master and media id, and on `next_id`.
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use deckcraft_engine::Session;
@@ -62,6 +61,34 @@ fn mixed_bytes() -> Vec<u8> {
     deckcraft_pptx::export(&p).expect("export")
 }
 
+/// The first import of the mixed deck must still hold every feature it was built to exercise.
+fn assert_mixed_features(p: &Presentation) {
+    let all: Vec<&Shape> = p.slides.iter().flat_map(|s| s.shapes.iter()).collect();
+    assert!(all.iter().any(|s| matches!(s.kind, ShapeKind::Group { .. }) && depth(s) >= 3), "nested group (depth 3 with its leaf) dropped");
+    let glued = all.iter().any(|s| matches!(s.kind, ShapeKind::Connector { start: Some(_), end: Some(_), .. }));
+    assert!(glued, "glued connector dropped");
+    assert!(!p.media.is_empty(), "media dropped");
+    fn find_pic<'a>(shapes: &'a [Shape], out: &mut Vec<&'a Shape>) {
+        for s in shapes {
+            if matches!(s.kind, ShapeKind::Picture { .. }) {
+                out.push(s);
+            }
+            find_pic(s.children(), out);
+        }
+    }
+    let mut pics = Vec::new();
+    for s in &p.slides {
+        find_pic(&s.shapes, &mut pics);
+    }
+    assert!(!pics.is_empty(), "picture dropped");
+    for pic in pics {
+        let ShapeKind::Picture { fill } = &pic.kind else { continue };
+        assert!(p.media.iter().any(|m| m.id == fill.media), "picture media id not in media list");
+    }
+    assert!(all.iter().any(|s| matches!(s.kind, ShapeKind::Table(_))), "table dropped");
+    assert!(p.slides.iter().any(|s| !s.notes_text().is_empty()), "notes dropped");
+}
+
 fn decks() -> Vec<(&'static str, Vec<u8>)> {
     vec![("sample", sample_bytes()), ("mixed", mixed_bytes())]
 }
@@ -86,12 +113,52 @@ fn ids(p: &Presentation) -> Vec<u32> {
     for m in &p.media {
         out.push(m.id.0);
     }
+    out.extend(master_layout_ids(p));
     out
+}
+
+/// Master ids and, after each, the ids of its layouts.
+fn master_layout_ids(p: &Presentation) -> Vec<u32> {
+    let mut out = Vec::new();
+    for m in &p.masters {
+        out.push(m.id.0);
+        out.extend(m.layouts.iter().map(|l| l.id.0));
+    }
+    out
+}
+
+/// Slide ids, each followed by the ids of its shapes (depth first).
+fn slide_shape_ids(p: &Presentation) -> Vec<Vec<u32>> {
+    fn walk(shapes: &[Shape], out: &mut Vec<u32>) {
+        for s in shapes {
+            out.push(s.id.0);
+            walk(s.children(), out);
+        }
+    }
+    p.slides
+        .iter()
+        .map(|s| {
+            let mut v = vec![s.id.0];
+            walk(&s.shapes, &mut v);
+            v
+        })
+        .collect()
+}
+
+fn digest(p: &Presentation) -> String {
+    ids(p).iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+}
+
+fn depth(shape: &Shape) -> usize {
+    1 + shape.children().iter().map(depth).max().unwrap_or(0)
 }
 
 fn check_all_equal(name: &str, bytes: &[u8]) {
     let first = import(bytes);
     assert!(!first.slides.is_empty(), "{name}: no slides");
+    if name == "mixed" {
+        assert_mixed_features(&first);
+    }
     let first_ids = ids(&first);
     for i in 0..20 {
         let again = import(bytes);
@@ -111,22 +178,50 @@ fn same_bytes_import_to_the_same_ids() {
     }
 }
 
+const CHILD_ENV: &str = "DECKCRAFT_LIVE_IDS_CHILD";
+
+/// Run by the parent test below in a separate process (own random hasher seed); a no-op otherwise.
 #[test]
-fn import_order_does_not_follow_hash_order() {
-    // Touch the hasher state first: a per-process random hasher would show in the result.
-    let mut noise: HashMap<String, u32> = HashMap::new();
-    for i in 0..500u32 {
-        noise.insert(format!("k{i}-{}", i.wrapping_mul(2_654_435_761)), i);
+fn child_prints_digests() {
+    if std::env::var_os(CHILD_ENV).is_none() {
+        return;
     }
-    assert!(!noise.is_empty());
     for (name, bytes) in decks() {
-        let before = import(&bytes);
-        for i in 0..100u32 {
-            noise.insert(format!("more{i}"), i);
-        }
-        let after = import(&bytes);
-        assert_eq!(ids(&after), ids(&before), "{name}: ids");
-        assert!(after == before, "{name}: differs after hasher noise");
-        check_all_equal(name, &bytes);
+        println!("\nDIGEST {name} {}", digest(&import(&bytes)));
     }
 }
+
+#[test]
+fn import_order_does_not_follow_hash_order() {
+    let here: Vec<String> = decks().iter().map(|(n, b)| format!("DIGEST {n} {}", digest(&import(b)))).collect();
+    let exe = std::env::current_exe().expect("exe");
+    for run in 0..4 {
+        let out = std::process::Command::new(&exe)
+            .args(["live_ids::child_prints_digests", "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("spawn child");
+        assert!(out.status.success(), "child {run} failed");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let got: Vec<String> = text.lines().filter(|l| l.starts_with("DIGEST ")).map(str::to_owned).collect();
+        assert_eq!(got, here, "child process {run} imported different ids");
+    }
+}
+
+#[test]
+fn sample_deck_ids_are_the_recorded_ones() {
+    let p = import(&sample_bytes());
+    assert_eq!(slide_shape_ids(&p), GOLDEN_SAMPLE.iter().map(|s| s.to_vec()).collect::<Vec<_>>(), "slide and shape ids of the sample deck");
+    assert!(!master_layout_ids(&p).is_empty(), "no masters");
+}
+
+const GOLDEN_SAMPLE: &[&[u32]] = &[
+    &[291, 258, 259, 260],
+    &[292, 262, 263],
+    &[293, 265, 266],
+    &[294, 268, 269, 270, 271, 272, 273, 274, 275, 276],
+    &[295, 278, 279],
+    &[296, 281, 282],
+    &[297, 284, 285, 286],
+    &[298, 288, 289, 290],
+];
