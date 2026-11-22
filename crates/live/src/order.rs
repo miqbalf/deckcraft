@@ -1,111 +1,308 @@
 //! Fractional order keys for slides and z-order.
 //!
-//! Keys are strings over the digits `0-9A-Za-z` (ASCII order). The scheme is the standard
-//! fractional-indexing midpoint: find the first position where a digit fits strictly between the
-//! neighbours, else copy the lower neighbour's digit and go deeper. A fixed-width suffix of the
-//! author's `space` (digits `1-z`, never `0`) is appended, so two peers inserting into the same
-//! gap never produce equal keys, and no key ends in `0` (which would leave no room below it).
-//! Any string orders; peers' junk keys never panic.
+//! This is a port of the public-domain fractional-indexing algorithm (David Greenspan's
+//! description, as published by rocicorp): a key is a variable-length integer part (its first
+//! letter says how long it is, `a`..`z` and `A`..`Z`) followed by a base-62 fraction over the
+//! digits `0-9A-Za-z` that never ends in `0`. Appending or prepending steps the integer part, so
+//! keys grow by O(log n), not by a character per operation; inserting between two neighbours
+//! takes the midpoint of the fractions.
+//!
+//! Additions on top of the published algorithm:
+//! - a fixed-width suffix made from the author's `space` (digits `1-z`) is appended when it still
+//!   fits strictly inside the gap, so two peers inserting into the same gap never tie;
+//! - peers' strings are untrusted: an invalid neighbour is ignored (a bad upper neighbour is an
+//!   open end) and nothing here panics.
+//!
+//! Any string orders (`order` sorts by `(key, id)`); only `between` makes keys.
 
+/// Digits in ASCII order.
 const DIGITS: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-/// Width of the space suffix: 61^3 > 32 768 live id spaces.
+const BASE: usize = 62;
+/// Width of the varying part of the space suffix: 61^3 > 32 768 live id spaces.
 const SPACE_WIDTH: usize = 3;
-/// Sentinel above every code point: the open upper end.
-const OPEN: i64 = 0x11_0000;
+/// First digit of every suffix: mid-range, so the suffix never blocks a later insert below it.
+const SUFFIX_LEAD: u8 = b'V';
+/// The smallest integer part; it has no predecessor, so it is not a valid key by itself.
+const SMALLEST_INTEGER: &[u8] = b"A00000000000000000000000000";
 
-fn is_digit(c: i64) -> bool {
-    u8::try_from(c).is_ok_and(|b| DIGITS.contains(&b))
+fn digit_index(b: u8) -> Option<usize> {
+    DIGITS.iter().position(|d| *d == b)
 }
 
-/// `space` as fixed-minimum-width base 61 over `1-z`: distinct spaces give distinct strings.
-fn space_suffix(space: u32) -> String {
+fn digit_at(i: usize) -> u8 {
+    DIGITS.get(i).copied().unwrap_or(b'0')
+}
+
+/// Length of the integer part announced by its first letter.
+fn integer_len(head: u8) -> Option<usize> {
+    match head {
+        b'a'..=b'z' => Some(usize::from(head - b'a') + 2),
+        b'A'..=b'Z' => Some(usize::from(b'Z' - head) + 2),
+        _ => None,
+    }
+}
+
+fn integer_part(key: &[u8]) -> &[u8] {
+    let n = key.first().and_then(|h| integer_len(*h)).unwrap_or(0);
+    key.get(..n).unwrap_or(key)
+}
+
+fn valid(key: &[u8]) -> bool {
+    let Some(n) = key.first().and_then(|h| integer_len(*h)) else {
+        return false;
+    };
+    if key.len() < n || key == SMALLEST_INTEGER || !key.iter().all(|b| digit_index(*b).is_some()) {
+        return false;
+    }
+    key.get(n..).is_some_and(|f| f.last() != Some(&b'0'))
+}
+
+/// True when `key` is a key this scheme could have made (peers' other strings still order).
+pub fn is_key(key: &str) -> bool {
+    valid(key.as_bytes())
+}
+
+/// Midpoint of two fractions (`a` < `b`, neither ending in `0`; `b` None is the open end).
+fn midpoint(mut a: &[u8], mut b: Option<&[u8]>) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        if let Some(bb) = b {
+            let mut n = 0;
+            while a.get(n).copied().unwrap_or(b'0') == bb.get(n).copied().unwrap_or(0) {
+                n += 1;
+            }
+            if n > 0 {
+                out.extend_from_slice(bb.get(..n).unwrap_or(&[]));
+                a = a.get(n..).unwrap_or(&[]);
+                b = Some(bb.get(n..).unwrap_or(&[]));
+                continue;
+            }
+        }
+        let digit_a = a.first().and_then(|d| digit_index(*d)).unwrap_or(0);
+        let digit_b = match b.and_then(|bb| bb.first()) {
+            Some(d) => digit_index(*d).unwrap_or(BASE),
+            None => BASE,
+        };
+        if digit_b > digit_a + 1 {
+            out.push(digit_at((digit_a + digit_b).div_ceil(2)));
+            return out;
+        }
+        if let Some(bb) = b.filter(|bb| bb.len() > 1) {
+            out.push(bb.first().copied().unwrap_or(b'0'));
+            return out;
+        }
+        out.push(digit_at(digit_a));
+        a = a.get(1..).unwrap_or(&[]);
+        b = None;
+    }
+}
+
+fn increment_integer(x: &[u8]) -> Option<Vec<u8>> {
+    let (head, rest) = x.split_first()?;
+    let mut digs = rest.to_vec();
+    let mut carry = true;
+    for d in digs.iter_mut().rev() {
+        let next = digit_index(*d)? + 1;
+        if next == BASE {
+            *d = b'0';
+        } else {
+            *d = digit_at(next);
+            carry = false;
+            break;
+        }
+    }
+    let mut head = *head;
+    if carry {
+        if head == b'Z' {
+            return Some(b"a0".to_vec());
+        }
+        if head == b'z' {
+            return None;
+        }
+        head += 1;
+        if head > b'a' {
+            digs.push(b'0');
+        } else {
+            digs.pop();
+        }
+    }
+    let mut out = vec![head];
+    out.extend(digs);
+    Some(out)
+}
+
+fn decrement_integer(x: &[u8]) -> Option<Vec<u8>> {
+    let (head, rest) = x.split_first()?;
+    let mut digs = rest.to_vec();
+    let mut borrow = true;
+    for d in digs.iter_mut().rev() {
+        let i = digit_index(*d)?;
+        if i == 0 {
+            *d = digit_at(BASE - 1);
+        } else {
+            *d = digit_at(i - 1);
+            borrow = false;
+            break;
+        }
+    }
+    let mut head = *head;
+    if borrow {
+        if head == b'a' {
+            let mut out = vec![b'Z'];
+            out.push(digit_at(BASE - 1));
+            return Some(out);
+        }
+        if head == b'A' {
+            return None;
+        }
+        head -= 1;
+        if head < b'Z' {
+            digs.push(digit_at(BASE - 1));
+        } else {
+            digs.pop();
+        }
+    }
+    let mut out = vec![head];
+    out.extend(digs);
+    Some(out)
+}
+
+/// The published `generateKeyBetween`, on valid keys with `a` < `b`. None only when the key
+/// space is exhausted (`a` is the largest or `b` the smallest possible key).
+fn generate(a: Option<&[u8]>, b: Option<&[u8]>) -> Option<Vec<u8>> {
+    match (a, b) {
+        (None, None) => Some(b"a0".to_vec()),
+        (None, Some(b)) => {
+            let ib = integer_part(b);
+            let fb = b.get(ib.len()..).unwrap_or(&[]);
+            if ib == SMALLEST_INTEGER {
+                let mut out = ib.to_vec();
+                out.extend(midpoint(&[], Some(fb)));
+                return Some(out);
+            }
+            if ib < b {
+                return Some(ib.to_vec());
+            }
+            decrement_integer(ib)
+        }
+        (Some(a), None) => {
+            let ia = integer_part(a);
+            let fa = a.get(ia.len()..).unwrap_or(&[]);
+            match increment_integer(ia) {
+                Some(i) => Some(i),
+                None => {
+                    let mut out = ia.to_vec();
+                    out.extend(midpoint(fa, None));
+                    Some(out)
+                }
+            }
+        }
+        (Some(a), Some(b)) => {
+            let ia = integer_part(a);
+            let fa = a.get(ia.len()..).unwrap_or(&[]);
+            let ib = integer_part(b);
+            let fb = b.get(ib.len()..).unwrap_or(&[]);
+            if ia == ib {
+                let mut out = ia.to_vec();
+                out.extend(midpoint(fa, Some(fb)));
+                return Some(out);
+            }
+            let i = increment_integer(ia)?;
+            if i.as_slice() < b {
+                return Some(i);
+            }
+            let mut out = ia.to_vec();
+            out.extend(midpoint(fa, None));
+            Some(out)
+        }
+    }
+}
+
+/// `V` then `space` as fixed-minimum-width base 61 over `1-z`: distinct spaces give distinct
+/// strings, and the last digit is never `0`.
+fn space_suffix(space: u32) -> Vec<u8> {
     let mut n = u64::from(space);
     let mut out = Vec::new();
     while n > 0 || out.len() < SPACE_WIDTH {
         let d = usize::try_from(n % 61).unwrap_or(0);
-        out.push(DIGITS.get(d + 1).copied().unwrap_or(b'1'));
+        out.push(digit_at(d + 1));
         n /= 61;
     }
+    out.push(SUFFIX_LEAD);
     out.reverse();
-    out.into_iter().map(char::from).collect()
+    out
 }
 
-/// `n` strictly increasing keys, evenly spread, deterministic, with room between neighbours.
+/// `n` strictly increasing keys, deterministic, with room between neighbours.
 pub fn seed_keys(n: usize) -> Vec<String> {
-    if n == 0 {
-        return Vec::new();
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(n);
+    for _ in 0..n {
+        let next = match out.last() {
+            None => generate(None, None),
+            Some(last) => generate(Some(last), None),
+        };
+        match next {
+            Some(k) => out.push(k),
+            None => break,
+        }
     }
-    let mut width = 1u32;
-    while 62u128.pow(width) < 4 * (n as u128 + 1) {
-        width += 1;
-    }
-    let total = 62u128.pow(width);
-    (0..n)
-        .map(|i| {
-            let mut v = (i as u128 + 1) * total / (n as u128 + 1);
-            let mut ds = Vec::new();
-            for _ in 0..width {
-                ds.push(usize::try_from(v % 62).unwrap_or(0));
-                v /= 62;
-            }
-            ds.reverse();
-            // Never end in '0': spacing is at least 4, so the bump keeps the order strict.
-            if let Some(last) = ds.last_mut()
-                && *last == 0
-            {
-                *last = 1;
-            }
-            ds.into_iter().map(|d| char::from(DIGITS.get(d).copied().unwrap_or(b'1'))).collect()
-        })
-        .collect()
+    out.into_iter().map(|k| String::from_utf8_lossy(&k).into_owned()).collect()
 }
 
 /// lo < key < hi (None = open end). Different `space`s never give equal keys for the same gap.
 /// lo and hi may be any strings from a peer (junk included); lo >= hi is treated as hi = None.
+/// An invalid `hi` is an open end; an invalid `lo` is ignored. Neither panics; the key's content
+/// is never logged.
 pub fn between(lo: Option<&str>, hi: Option<&str>, space: u32) -> String {
-    let lo: Vec<char> = lo.unwrap_or("").chars().collect();
-    let hi: Option<Vec<char>> = hi.map(|h| h.chars().collect());
-    let hi = hi.filter(|h| lo.as_slice() < h.as_slice());
-    let mut key = String::new();
-    let mut lo_tight = true;
-    let mut hi_tight = hi.is_some();
-    let mut i = 0usize;
-    loop {
-        let l: i64 = if lo_tight { lo.get(i).map_or(-1, |c| i64::from(u32::from(*c))) } else { -1 };
-        let h: i64 = match (&hi, hi_tight) {
-            (Some(hv), true) => match hv.get(i) {
-                Some(c) => i64::from(u32::from(*c)),
-                None => break, // cannot happen for lo < hi; fall back below
-            },
-            _ => OPEN,
-        };
-        let cands: Vec<u8> = DIGITS.iter().copied().filter(|b| l < i64::from(*b) && i64::from(*b) < h).collect();
-        if let Some(d) = cands.get(cands.len() / 2) {
-            key.push(char::from(*d));
-            key.push_str(&space_suffix(space));
-            return key;
+    let lo = lo.map(str::as_bytes).filter(|k| {
+        let ok = valid(k);
+        if !ok {
+            log::debug!("order: ignoring a lower neighbour that is not an order key");
         }
-        if l >= 0 {
-            if let Some(c) = u32::try_from(l).ok().and_then(char::from_u32) {
-                key.push(c);
-            }
-            if l < h {
-                hi_tight = false;
-            }
-        } else if let Some(c) = u32::try_from(h).ok().and_then(char::from_u32).filter(|_| h < OPEN) {
-            key.push(c);
-            lo_tight = false;
-        } else {
-            break;
+        ok
+    });
+    let hi = hi.map(str::as_bytes).filter(|k| {
+        let ok = valid(k);
+        if !ok {
+            log::debug!("order: treating an upper neighbour that is not an order key as open");
         }
-        if !is_digit(l) && l < 0 && h >= OPEN {
-            break;
+        ok
+    });
+    let hi = hi.filter(|h| lo.is_none_or(|l| l < *h));
+    let key = make(lo, hi, &space_suffix(space));
+    String::from_utf8_lossy(&key).into_owned()
+}
+
+fn make(lo: Option<&[u8]>, hi: Option<&[u8]>, suffix: &[u8]) -> Vec<u8> {
+    let fits = |k: &[u8]| -> Option<Vec<u8>> {
+        let mut cand = k.to_vec();
+        cand.extend_from_slice(suffix);
+        hi.is_none_or(|h| cand.as_slice() < h).then_some(cand)
+    };
+    let mut plain: Option<Vec<u8>> = None;
+    // Prefer the integer part of `hi` as the bound: it leaves the whole fraction range free.
+    let mut bound = hi;
+    if let Some(h) = hi {
+        let ib = integer_part(h);
+        if ib < h && lo.is_none_or(|l| l < ib) {
+            bound = Some(ib);
         }
-        i += 1;
     }
-    // No answer exists (or junk edge): still return something that orders after `lo`.
-    key.push_str(&space_suffix(space));
-    key
+    for b in [bound, hi] {
+        let mut k = generate(lo, b);
+        for _ in 0..=hi.map_or(0, <[u8]>::len) {
+            let Some(cur) = k else { break };
+            if plain.is_none() {
+                plain = Some(cur.clone());
+            }
+            if let Some(c) = fits(&cur) {
+                return c;
+            }
+            k = generate(Some(&cur), hi);
+        }
+    }
+    // Nothing with a suffix fits: the plain key is still strictly inside the gap.
+    plain.or_else(|| generate(lo, None)).unwrap_or_else(|| b"a0".to_vec())
 }
 
 /// Visible order: by (key, id).
