@@ -22,6 +22,7 @@ mod trendline;
 pub mod words;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub use deckcraft_color::{ColorScheme, ColorTransform, Rgba, SchemeSlot};
 pub use deckcraft_geom::{Rect, Size, Xfrm};
@@ -973,7 +974,7 @@ pub struct KeptPart {
     pub from_root: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Presentation {
     /// Slide size in points (default 16:9, 960 × 540). Read leniently: a missing, null or
@@ -1016,6 +1017,110 @@ pub struct Presentation {
     /// Unmodelled presentation-level XML kept for round-trip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_ext: Option<String>,
+    /// While editing live: the block this peer mints new ids from, so peers never collide
+    /// (Ruling D5). Not saved, and ignored when comparing decks.
+    #[serde(skip)]
+    pub id_block: Option<IdBlock>,
+}
+
+/// Decks compare by content: [`Presentation::id_block`] is allocation state and is ignored, so
+/// live peers compare equal (Ruling D5). Every other field is listed, so a new one cannot be
+/// left out.
+impl PartialEq for Presentation {
+    fn eq(&self, other: &Self) -> bool {
+        let Presentation {
+            slide_size,
+            notes_size,
+            slides,
+            masters,
+            notes_master,
+            handout_master,
+            sections,
+            custom_shows,
+            show,
+            header_footer,
+            props,
+            default_text_style,
+            media,
+            first_slide_number,
+            next_id,
+            embedded_fonts,
+            table_styles,
+            tags,
+            kept_parts,
+            guides,
+            raw_ext,
+            id_block: _,
+        } = self;
+        *slide_size == other.slide_size
+            && *notes_size == other.notes_size
+            && *slides == other.slides
+            && *masters == other.masters
+            && *notes_master == other.notes_master
+            && *handout_master == other.handout_master
+            && *sections == other.sections
+            && *custom_shows == other.custom_shows
+            && *show == other.show
+            && *header_footer == other.header_footer
+            && *props == other.props
+            && *default_text_style == other.default_text_style
+            && *media == other.media
+            && *first_slide_number == other.first_slide_number
+            && *next_id == other.next_id
+            && *embedded_fonts == other.embedded_fonts
+            && *table_styles == other.table_styles
+            && *tags == other.tags
+            && *kept_parts == other.kept_parts
+            && *guides == other.guides
+            && *raw_ext == other.raw_ext
+    }
+}
+
+/// Where a live peer mints new ids: its own block, so peers never collide (Ruling D5).
+///
+/// The counter is shared by every clone, so an engine snapshot restored after a failed command
+/// can never hand out an id again.
+#[derive(Clone, Debug, Default)]
+pub struct IdBlock {
+    space: u32,
+    next: Arc<AtomicU32>,
+}
+
+impl IdBlock {
+    pub const SPACES: u32 = 32_768;
+    pub const PER_SPACE: u32 = 65_536;
+    /// None for space 0 or space >= SPACES.
+    pub fn new(space: u32) -> Option<IdBlock> {
+        (space != 0 && space < Self::SPACES).then(|| IdBlock { space, next: Arc::new(AtomicU32::new(0)) })
+    }
+    pub fn space(&self) -> u32 {
+        self.space
+    }
+    /// The next id of this block, `None` once all [`Self::PER_SPACE`] are handed out (or for a
+    /// defaulted block, whose space no peer owns).
+    fn alloc(&self) -> Option<u32> {
+        if self.space == 0 || self.space >= Self::SPACES {
+            return None;
+        }
+        let n = self.next.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < Self::PER_SPACE).then_some(n + 1)).ok()?;
+        Some(LIVE_ID_BASE | self.space << 16 | n)
+    }
+}
+
+/// Allocation state, not content: two decks differing only in their blocks are equal.
+impl PartialEq for IdBlock {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// The high bit marks ids minted from an [`IdBlock`]: `LIVE_ID_BASE | space << 16 | n`.
+pub const LIVE_ID_BASE: u32 = 0x8000_0000;
+
+/// Whether `id` has the shape of an id minted from a peer's [`IdBlock`] (high bit set, space in
+/// `1..IdBlock::SPACES`).
+pub fn is_live_minted(id: u32) -> bool {
+    id & LIVE_ID_BASE != 0 && (id & !LIVE_ID_BASE) >> 16 != 0
 }
 
 /// A drawing guide: a vertical line at `pos` points from the slide's left edge, or a horizontal
@@ -1037,7 +1142,13 @@ impl Presentation {
     /// A fresh id, unique across slides, shapes, layouts, masters and media in this deck. `None`
     /// once every id is in use (a hostile file can arrive that way): the deck cannot grow
     /// further, and callers must refuse the change rather than duplicate ids (#407).
+    ///
+    /// While editing live ([`Self::id_block`]), ids come from this peer's block instead, and
+    /// `None` means the block is used up.
     pub fn alloc_id(&mut self) -> Option<u32> {
+        if let Some(block) = &self.id_block {
+            return block.alloc();
+        }
         let next = self.next_id.max(1).checked_add(1)?;
         self.next_id = next;
         Some(next)

@@ -339,3 +339,62 @@ fn colour_alpha_follows_alpha_mod_and_off() {
     let both = base().with(ColorTransform::Alpha(40000)).with(ColorTransform::AlphaMod(50000));
     assert!((both.alpha() - 0.2).abs() < 1e-9, "{}", both.alpha());
 }
+
+/// A live peer's block hands out every id in it once, each marked live-minted, and then refuses
+/// (Ruling D5, H4).
+#[test]
+fn block_ids_are_in_the_block_and_distinct() {
+    let mut p = Presentation { id_block: crate::IdBlock::new(7), ..Default::default() };
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..crate::IdBlock::PER_SPACE {
+        let id = p.alloc_id().expect("id inside the block");
+        assert!(crate::is_live_minted(id), "{id:#x} is live-minted");
+        assert!(seen.insert(id), "{id:#x} handed out twice");
+    }
+    assert_eq!(p.alloc_id(), None, "a used-up block refuses");
+    assert_eq!(p.alloc_id(), None);
+}
+
+#[test]
+fn id_block_spaces_outside_the_range_are_refused() {
+    assert!(crate::IdBlock::new(0).is_none());
+    assert!(crate::IdBlock::new(crate::IdBlock::SPACES).is_none());
+    let last = crate::IdBlock::new(crate::IdBlock::SPACES - 1).expect("last space");
+    assert_eq!(last.space(), crate::IdBlock::SPACES - 1);
+    // A defaulted block is not a peer's block: it mints nothing.
+    let mut p = Presentation { id_block: Some(crate::IdBlock::default()), ..Default::default() };
+    assert_eq!(p.alloc_id(), None);
+}
+
+#[test]
+fn two_blocks_never_share_an_id() {
+    let mut a = Presentation { id_block: crate::IdBlock::new(1), ..Default::default() };
+    let mut b = Presentation { id_block: crate::IdBlock::new(2), ..Default::default() };
+    let ids_a: std::collections::HashSet<u32> = (0..1_000).map(|_| a.alloc_id().expect("id")).collect();
+    let ids_b: std::collections::HashSet<u32> = (0..1_000).map(|_| b.alloc_id().expect("id")).collect();
+    assert_eq!(ids_a.len(), 1_000);
+    assert_eq!(ids_b.len(), 1_000);
+    assert!(ids_a.is_disjoint(&ids_b));
+}
+
+/// An engine snapshot restored after a failed command shares the counter, so an id it handed
+/// out is never handed out again (Ruling D5).
+#[test]
+fn a_restored_snapshot_does_not_reuse_an_id() {
+    let mut p = Presentation { id_block: crate::IdBlock::new(3), ..Default::default() };
+    let mut snapshot = p.clone();
+    let on_clone = snapshot.alloc_id().expect("id");
+    let on_original = p.alloc_id().expect("id");
+    assert_ne!(on_clone, on_original);
+}
+
+#[test]
+fn id_block_is_not_saved_and_not_compared() {
+    let mut p = Presentation { id_block: crate::IdBlock::new(4), ..Default::default() };
+    p.alloc_id().expect("id");
+    let back: Presentation = serde_json::from_str(&serde_json::to_string(&p).expect("save")).expect("load");
+    assert!(back.id_block.is_none(), "the block is not saved");
+    let without = Presentation { id_block: None, ..p.clone() };
+    assert_eq!(p, without, "presentations differing only in the block are equal");
+    assert_eq!(p, Presentation { id_block: crate::IdBlock::new(9), ..p.clone() });
+}

@@ -2317,5 +2317,6 @@ pub(crate) fn pres_from_craft(p: craft_pptx::Presentation) -> deckcraft_model::P
             .collect(),
         guides: p.guides.into_iter().map(|g| deckcraft_model::DrawGuide { vertical: g.vertical, pos: g.pos }).collect(),
         raw_ext: p.raw_ext,
+        id_block: None,
     }
 }
