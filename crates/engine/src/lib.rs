@@ -20,6 +20,7 @@ pub mod inkshape;
 pub mod io;
 pub mod keys;
 pub mod links;
+pub mod live;
 pub mod media_refs;
 pub mod recovery;
 pub mod sample;
@@ -41,6 +42,7 @@ pub use deckcraft_media as media;
 pub use deckcraft_model as model;
 pub use deckcraft_pdf as pdf;
 pub use deckcraft_render as render;
+pub use live::{EditObserver, Edited};
 pub use tools::{Mods, PointerEvent, PointerKind, ToolKind};
 
 #[derive(Debug, thiserror::Error)]
@@ -517,6 +519,8 @@ pub struct Session {
     next_loaded: u64,
     /// Compositions the application settled itself (see [`Session::composition_settles`]).
     composition_settles: u64,
+    /// Edit observers and the scope in progress (H1).
+    live: live::Live,
 }
 
 impl Default for Session {
@@ -551,6 +555,7 @@ impl Session {
             loaded: vec![],
             next_loaded: 0,
             composition_settles: 0,
+            live: live::Live::default(),
         }
     }
     /// Hand over a presentation read on another thread ([`cmd::file::read_presentation_file`]);
@@ -616,6 +621,7 @@ impl Session {
         let was = self.active().map(|d| d.uid);
         if i < self.docs.len() {
             let d = self.docs.remove(i);
+            self.live_closed(d.uid);
             if let Some(dir) = &self.recovery_dir {
                 recovery::discard(dir, d.uid);
             }
@@ -638,7 +644,7 @@ impl Session {
     /// Run command `id`. A panic inside it becomes [`EngineError::Internal`] and leaves the
     /// presentation as it was.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
-        self.guarded(id, |s| s.execute_unguarded(id, params))
+        self.live_scope(|s| s.guarded(id, |s| s.execute_unguarded(id, params)), |_| id.to_string())
     }
 
     /// Resolve and run a command, settling composition first, checking eligibility, rolling back a
@@ -752,9 +758,11 @@ impl Session {
         let vertex_kind = self.tool.vertex_kind.clone();
         let Some(st) = self.active_mut() else { return };
         let Some(c) = st.composition.take() else { return };
+        let (uid, before) = (st.uid, c.before.clone());
         if !Arc::ptr_eq(&c.before, &st.doc) {
             push_undo(st, HistoryEntry { label: "Type Text".into(), doc: c.before, selection: c.before_selection, vertex_kind });
         }
+        self.live_cut(uid, before, "text.compose");
     }
 
     /// Settle a composition because the application did something else (a click, a key, a
