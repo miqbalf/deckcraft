@@ -77,6 +77,9 @@ craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "63196e66f3
 # craft-update: app-specific pretend versions apply to startup and manual checks.
 craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "63196e66f3033a6623eb629af95a104d26986725", features = ["egui"] }
 craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "63196e66f3033a6623eb629af95a104d26986725", version = "=0.1.0" }
+# Share (Nextcloud sharing or "No Nextcloud connected"): the miqbalf fork's feat/share-hook, std
+# and serde only, so it sits next to the storytold pins without a second craft-* graph.
+craft-share = { git = "https://github.com/miqbalf/craft-libs", rev = "0434267cbc03705d1a4a22986bfc533ae92b812b", version = "0.1.0" }
 i_overlay = "9"
 quick-xml = "0.41"
 zip = { version = "3", default-features = false, features = ["deflate"] }

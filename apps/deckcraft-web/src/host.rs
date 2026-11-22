@@ -32,6 +32,12 @@
 //!   copy, Save As), and on `deckcraft:save-failed { id, error }` it stays unsaved with "Couldn't
 //!   save to Nextcloud: {error}". Without `saves` nothing changes: a file handed over counts as
 //!   saved at once.
+//! - `deckcraft:host` with `share: true` (from the host): the host opens Nextcloud's own sharing
+//!   for the file it opened. Share (`file.share`: the title bar's Share button, File › Share,
+//!   command search, automation) then posts `deckcraft:share {}` while that file is the one shown;
+//!   for any other presentation, or without `share`, the app says "No Nextcloud connected" and
+//!   does nothing else. `deckcraft:ready` says `shareButton: true`: the app has its own Share
+//!   button, so the host shows none.
 //! - `deckcraft:fonts { fonts: [{name, url}] }` (from the host): each same-origin font file is
 //!   fetched and installed like a font the user added; the missing-font notice waits for them.
 //! - `deckcraft:dirty` whenever unsaved changes appear or go away, `deckcraft:failed` when the
@@ -45,7 +51,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use craft_web_host::web::{FileData, Host, Message, fetch_font};
-use deckcraft_ui_egui::{HostAnswer, HostSaves, Services, SlideApp};
+use deckcraft_ui_egui::{HostAnswer, HostSaves, HostShares, Services, SlideApp};
 
 /// The app id in the host messages (`deckcraft:ready`).
 const APP: &str = "deckcraft";
@@ -75,6 +81,8 @@ pub struct Bridge {
     host: Rc<Host>,
     /// Whether the host stores saves and answers each, and its answers (shared with the app).
     saves: HostSaves,
+    /// Whether the host opens Nextcloud's sharing itself (its `host` message said `share: true`).
+    shares: HostShares,
     fonts: Rc<RefCell<Vec<FontEvent>>>,
     /// Files the host sent (the name, if it sent one), waiting for the next frame.
     opened: Rc<RefCell<Vec<(Option<String>, Vec<u8>)>>>,
@@ -90,7 +98,7 @@ impl Bridge {
         if host.mode() == craft_web_host::Mode::Parent && web_sys::window()?.location().origin().ok()? == "null" {
             return None;
         }
-        Some(Self { host: Rc::new(host), saves: HostSaves::default(), fonts: Rc::default(), opened: Rc::default() })
+        Some(Self { host: Rc::new(host), saves: HostSaves::default(), shares: HostShares::default(), fonts: Rc::default(), opened: Rc::default() })
     }
 
     /// Hand saved and exported files to the host instead of downloading them, and hear the files
@@ -102,6 +110,11 @@ impl Bridge {
         let bridge = self.clone();
         services.host_save =
             Some(Box::new(move |name: &str, bytes: &[u8], save_as: bool, id: Option<&str>| bridge.post_save(name, bytes, save_as, id)));
+        // Share (`file.share`): a host that said `share: true` opens Nextcloud's sharing for the
+        // file it opened (`deckcraft:share`); otherwise the app says no Nextcloud is connected.
+        services.host_shares = self.shares.clone();
+        let bridge = self.clone();
+        services.host_share = Some(Box::new(move || bridge.host.post_share()));
         // Exports and Print are copies: the host answers them too, so a failure is shown.
         let bridge = self.clone();
         services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
@@ -125,7 +138,8 @@ impl Bridge {
     }
 
     pub fn post_ready(&self) {
-        let _ = self.host.post_ready(env!("CARGO_PKG_VERSION"), false);
+        // `shareButton: true`: DeckCraft has its own Share button, so the host shows none.
+        let _ = self.host.post_ready_with(env!("CARGO_PKG_VERSION"), false, true);
     }
 
     /// The app couldn't start (no WebGPU or WebGL2, for example): let the host say so.
@@ -172,11 +186,20 @@ impl Bridge {
         let opened = self.opened.clone();
         let host = self.host.clone();
         let saves = self.saves.clone();
+        let shares = self.shares.clone();
         let fonts = self.fonts.clone();
         self.host.listen(move |message| {
             let (name, data) = match message {
                 Message::Open { name, data } => (name, data),
-                Message::Host { saves: true, .. } => return saves.set_confirms(),
+                Message::Host { saves: confirms, share, .. } => {
+                    if confirms {
+                        saves.set_confirms();
+                    }
+                    if share {
+                        shares.set();
+                    }
+                    return;
+                }
                 Message::Saved { id, name } => {
                     saves.answer(HostAnswer::Saved { id, name });
                     return ctx.request_repaint();

@@ -52,6 +52,7 @@ pub fn common() -> Vec<QatItem> {
         QatItem::new("app.find", "Find", Icon::Search),
         QatItem::new("review.spelling", "Spelling", Icon::Spelling),
         QatItem::new("app.exportDialog", "Export", Icon::Export),
+        QatItem::new("file.share", "Share", Icon::Share),
     ]
 }
 

@@ -98,7 +98,7 @@ pub fn ui_shortcut(app: &mut SlideApp, key: egui::Key, m: Mods) -> bool {
 
 /// The palette's entries for the lowercase query `q`. An engine command is hidden when a UI command has the same label: Open…, Save As…,
 /// Export… and Audio/Video from File… need a `path` the palette can't give, so the one entry left opens the dialog instead of failing.
-fn palette_items(session: &deckcraft_engine::Session, q: &str) -> Vec<(String, String, Option<&'static str>)> {
+pub(crate) fn palette_items(session: &deckcraft_engine::Session, q: &str) -> Vec<(String, String, Option<&'static str>)> {
     let mut items: Vec<(String, String, Option<&'static str>)> = session
         .commands()
         .into_iter()
@@ -188,6 +188,7 @@ pub fn menu_tree() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
                 ("Save", "file.save"),
                 ("Save As…", "app.saveAsDialog"),
                 ("Export…", "app.exportDialog"),
+                ("Share", "file.share"),
                 ("Print…", "app.print"),
                 ("-", ""),
                 ("Properties", "file.properties"),

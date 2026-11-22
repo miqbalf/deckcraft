@@ -114,6 +114,9 @@ fn services(native_wayland: bool) -> Services {
     // else. There, text goes through egui and pictures arrive as `PasteImage` events.
     let pasteboard = !native_wayland;
     Services {
+        // Share: a presentation in a folder the Nextcloud desktop client syncs opens Nextcloud's
+        // sharing in the browser; any other file says "No Nextcloud connected".
+        share_route: Some(Box::new(craft_share::desktop_route)),
         pick_open: Some(Box::new(|purpose: &str| {
             let d = rfd::FileDialog::new();
             let d = match purpose {

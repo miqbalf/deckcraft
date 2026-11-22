@@ -72,7 +72,10 @@ pub use panels::notes;
 pub use panels::selpane;
 pub use panels::thumbs;
 pub use ribbon::qat;
-pub use services::{DownloadFn, HostAnswer, HostSaveFn, HostSaves, Inbox, InboxEvent, InboxFile, OpenAsyncFn, PickFn, ReadFn, Services, WriteFn};
+pub use services::{
+    DownloadFn, HostAnswer, HostSaveFn, HostSaves, HostShareFn, HostShares, Inbox, InboxEvent, InboxFile, OpenAsyncFn, PickFn, ReadFn, Services,
+    ShareRouteFn, WriteFn,
+};
 use state::{FilePlace, FilePurpose, ImeDescriptorKey, ImeDestination, ImeTerminalStamp};
 pub use state::{RECENT_MAX, UiState, ViewMode, ZOOM_RANGE};
 
@@ -150,6 +153,7 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("app.insertVideoDialog", "Video from File…", None, "{}"),
     ("app.saveAsDialog", "Save As…", None, "{}"),
     ("app.exportDialog", "Export…", None, "{}"),
+    ("file.share", "Share", None, "{} → {route: nextcloudWeb|nextcloudDesktop|none, url?, message?}"),
     ("app.browseThemeDialog", "Browse for Themes…", None, "{}"),
     ("app.compareDialog", "Compare…", None, "{}"),
     ("app.dialog", "Open Dialog", None, "{id}"),
@@ -339,6 +343,13 @@ pub struct SlideApp {
     /// The empty presentation host mode starts with ([`SlideApp::start_for_host`]), until the
     /// first file the page sends takes its place.
     host_start: Option<u64>,
+    /// The presentation the framing page opened, and its file name then: the page shares that
+    /// file only, so Share for another presentation (or this one saved under another name) is
+    /// not connected (`app::share`).
+    host_file: Option<(u64, Option<String>)>,
+    /// Desktop Share's answer per open presentation (uid → its file then, the route): the lookup
+    /// runs once per presentation and file, not per frame or per press (`app::share`).
+    share_routes: HashMap<u64, (String, craft_share::ShareRoute)>,
     /// Saves handed to a page that answers each, waiting for its answer (`app::host_saves`).
     pending_host_saves: Vec<app::host_saves::PendingHostSave>,
     /// The page framing the app is sending fonts that are still arriving ([`SlideApp::host_fonts_coming`]).
@@ -477,6 +488,8 @@ mod reflection_pane_tests;
 mod replacefonts_tests;
 #[cfg(test)]
 mod reuse_picker_tests;
+#[cfg(test)]
+mod share_tests;
 #[cfg(test)]
 mod slide_size_tests;
 #[cfg(test)]

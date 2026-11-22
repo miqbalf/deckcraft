@@ -92,7 +92,7 @@ fn page_ids_round_trip_and_unknown_ids_are_refused() {
     let (top, bottom) = entries(false);
     assert_eq!(top, vec![Nav::Page(Page::Home), Nav::Page(Page::New), Nav::Page(Page::Open)], "the start screen has no presentation pages");
     assert_eq!(bottom, vec![Nav::Page(Page::About), Nav::Options]);
-    assert_eq!(entries(true).0.len(), 9);
+    assert_eq!(entries(true).0.len(), 10);
     assert_eq!(split_path("/home/me/Talk.pptx"), ("Talk.pptx".into(), "/home/me".into()));
     assert_eq!(format_bytes(512), "512 bytes");
     assert_eq!(format_bytes(33_485), "32.7 KB");

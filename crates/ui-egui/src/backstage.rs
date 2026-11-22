@@ -114,6 +114,7 @@ impl Page {
 pub enum Nav {
     Page(Page),
     Save,
+    Share,
     Close,
     Options,
 }
@@ -123,6 +124,7 @@ impl Nav {
         match self {
             Nav::Page(p) => p.label(),
             Nav::Save => "Save",
+            Nav::Share => "Share",
             Nav::Close => "Close",
             Nav::Options => "Options",
         }
@@ -131,18 +133,27 @@ impl Nav {
         match self {
             Nav::Page(p) => p.icon(),
             Nav::Save => Icon::Save,
+            Nav::Share => Icon::Share,
             Nav::Close => Icon::File,
             Nav::Options => Icon::Settings,
         }
     }
 }
 
-/// The side menu, top group then bottom group, in keyboard order. PowerPoint's Share (cloud) is
-/// left out; with nothing open only Home, New and Open stay at the top.
+/// The side menu, top group then bottom group, in keyboard order. Share opens Nextcloud's sharing
+/// (`file.share`); with nothing open only Home, New and Open stay at the top.
 pub fn entries(has_doc: bool) -> (Vec<Nav>, Vec<Nav>) {
     let mut top = vec![Nav::Page(Page::Home), Nav::Page(Page::New), Nav::Page(Page::Open)];
     if has_doc {
-        top.extend([Nav::Page(Page::Info), Nav::Save, Nav::Page(Page::SaveAs), Nav::Page(Page::Print), Nav::Page(Page::Export), Nav::Close]);
+        top.extend([
+            Nav::Page(Page::Info),
+            Nav::Save,
+            Nav::Page(Page::SaveAs),
+            Nav::Page(Page::Print),
+            Nav::Share,
+            Nav::Page(Page::Export),
+            Nav::Close,
+        ]);
     }
     (top, vec![Nav::Page(Page::About), Nav::Options])
 }
@@ -245,7 +256,7 @@ fn colours(t: &Tokens) -> (Color32, Color32) {
 
 /// Runs a side-menu action. Returns the page to show, or None to close the view (Some(current)
 /// leaves it as it is).
-fn act(app: &mut SlideApp, nav: Nav, current: Page) -> Option<Page> {
+pub(crate) fn act(app: &mut SlideApp, nav: Nav, current: Page) -> Option<Page> {
     match nav {
         Nav::Page(p) => Some(p),
         Nav::Save => {
@@ -259,6 +270,11 @@ fn act(app: &mut SlideApp, nav: Nav, current: Page) -> Option<Page> {
             app.save();
             let saved = app.session.active().is_some_and(|d| !d.is_dirty());
             if saved || web { None } else { Some(current) }
+        }
+        Nav::Share => {
+            // Back to the presentation, where the page's sharing or the message shows.
+            let _ = app.run("file.share", json!({}));
+            None
         }
         Nav::Close => {
             app.close_presentation();
