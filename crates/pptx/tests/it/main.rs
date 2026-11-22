@@ -12,6 +12,7 @@ mod corpus_themes;
 mod export_scale;
 mod fills;
 mod kept_parts;
+mod live_ids;
 mod locks;
 mod malformed;
 mod master_text_styles;
