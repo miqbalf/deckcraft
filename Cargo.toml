@@ -39,6 +39,12 @@ deckcraft-engine = { path = "crates/engine" }
 deckcraft-mcp = { path = "crates/mcp" }
 deckcraft-ui-egui = { path = "crates/ui-egui" }
 deckcraft-media = { path = "crates/media" }
+deckcraft-live = { path = "crates/live" }
+# Live co-editing (collab-craft, miqbalf fork): departs from AGENTS.md rule 10 by owner decision
+# (as for GridCraft and WordCraft). All three come from one collab-craft revision (origin/m1/c8).
+craft-collab = { git = "https://github.com/miqbalf/collab-craft", rev = "e29e9582c1cf3d8e8d72b9e73409312ce4095866", version = "=0.1.0" }
+craft-live = { git = "https://github.com/miqbalf/collab-craft", rev = "e29e9582c1cf3d8e8d72b9e73409312ce4095866", version = "=0.1.0" }
+craft-live-worker = { git = "https://github.com/miqbalf/collab-craft", rev = "e29e9582c1cf3d8e8d72b9e73409312ce4095866", version = "=0.1.0" }
 
 # foundation
 kurbo = { version = "0.13", features = ["serde"] }
@@ -47,6 +53,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
 proptest = "1"
+sha2 = { version = "0.11", default-features = false }
 rayon = "1"
 unicode-bidi = "0.3"
 unicode-segmentation = "1"
@@ -76,7 +83,8 @@ craft-metafile = { git = "https://github.com/storytold/craft-libs", rev = "63196
 craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "63196e66f3033a6623eb629af95a104d26986725", version = "=0.1.0", default-features = false, features = ["write", "write-simple-text"] }
 # craft-update: app-specific pretend versions apply to startup and manual checks.
 craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "63196e66f3033a6623eb629af95a104d26986725", features = ["egui"] }
-craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "63196e66f3033a6623eb629af95a104d26986725", version = "=0.1.0" }
+# craft-ui from the miqbalf fork: it carries craft_ui::presence (live co-editing, Ruling D21). Every other craft-libs crate stays on its storytold rev.
+craft-ui = { git = "https://github.com/miqbalf/craft-libs", rev = "71e6ef899f551665f690970d57a204afb433c5dd" }
 i_overlay = "9"
 quick-xml = "0.41"
 zip = { version = "3", default-features = false, features = ["deflate"] }
@@ -115,6 +123,11 @@ debug = false
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"
+
+# yrs asserts on arithmetic that wraps by design; the checks only fire in debug builds (Ruling D19).
+[profile.dev.package.yrs]
+debug-assertions = false
+overflow-checks = false
 
 [profile.release]
 opt-level = 3

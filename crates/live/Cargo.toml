@@ -1,0 +1,32 @@
+[package]
+name = "deckcraft-live"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeckCraft live co-editing: the yrs schema, mapping, gate, undo and presence over craft-live"
+
+[lints]
+workspace = true
+
+[features]
+# An in-memory relay so tests can join a real session with no server (dev use only).
+test-util = ["craft-live/test-util"]
+# The native socket hub, for the relay tests.
+native-hub = ["craft-collab/native-hub"]
+
+[dependencies]
+deckcraft-model = { workspace = true }
+deckcraft-pptx = { workspace = true }
+deckcraft-engine = { workspace = true }
+# From miqbalf/collab-craft, departing from AGENTS.md rule 10 by owner decision.
+craft-collab = { workspace = true }
+craft-live = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+craft-live = { workspace = true, features = ["test-util"] }
