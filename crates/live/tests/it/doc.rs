@@ -429,7 +429,7 @@ fn undoing_the_first_keystroke_keeps_a_peer_s_later_text() {
         })
         .expect("type");
     a.apply(&later).expect("apply");
-    let undo = a.undo_text().expect("undo");
+    let (undo, _) = a.undo_text().expect("undo");
     b.apply(&undo).expect("apply");
     for d in [&a, &b] {
         let text: String = d.text(target.clone()).expect("text").iter().map(|p| p.text()).collect();

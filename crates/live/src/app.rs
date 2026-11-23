@@ -10,7 +10,6 @@ use deckcraft_model::{IdBlock, Presentation, ShapeId, SlideId};
 use serde_json::Value;
 
 use crate::doc::{DeckChange, DeckDoc, TextTarget, Tomb};
-use crate::gate::NOT_YET_TEXT;
 use crate::kind::{Deck, DeckCaret, DeckEdit};
 use crate::local::plan;
 use crate::net::unshared;
@@ -19,6 +18,7 @@ use crate::remote::{Targets, land, whole};
 use crate::session::{Notice, UNMERGED_TEXT};
 use crate::split::{PlannedWrite, plan_split};
 use crate::tomb::{Tombs, inside, line_for, restore_writes, slide_of, slide_tomb, tomb_over, tombstoned};
+use crate::undo::{AFTER_UNDO_TEXT, Group, UNDO_SKIPPED_TEXT, UndoLog};
 use crate::unmerged::Unmerged;
 
 /// The frame one update may fill on the wire (base64 inside its submit), whatever larger cap
@@ -94,6 +94,11 @@ pub(crate) struct Mapping {
     pub scene: Scene,
     /// This window's text caret as sticky indexes, for remote text edits (L7, spec H2).
     pub mine: Option<Mine>,
+    /// My commands, for Undo and Redo (L6).
+    pub undo: UndoLog,
+    /// Commands made after an Undo in the same batch were dropped: the engine is rebuilt from
+    /// the replica once the batch landed.
+    pub resync_after: bool,
 }
 
 impl Mapping {
@@ -272,9 +277,10 @@ impl DeckApp<'_> {
                 continue;
             }
             let bound = wire_bound(writes.iter().map(PlannedWrite::size).sum());
+            let mut g = Group::default();
             let u = replica.write(false, |txn| {
                 for w in &writes {
-                    w.write(txn);
+                    g.write_noted(txn, w);
                 }
                 Ok(())
             });
@@ -316,6 +322,9 @@ impl DeckApp<'_> {
                 bound,
             });
             self.map.tombs.wrote(slides.iter().copied(), shapes.iter().copied());
+            // A Restore is a command of mine: Undo deletes it again.
+            g.slides.extend(slides.iter().copied());
+            self.map.undo.record(g);
             self.map.touched.whole.extend(slides);
             updates.push(u);
         }
@@ -324,6 +333,102 @@ impl DeckApp<'_> {
 
     /// The mapping of a batch of local edits (see [`LiveApp::local`]).
     fn local_inner(&mut self, replica: &mut DeckDoc, edits: &[DeckEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
+        // Commands made after an Undo or a Redo in this batch were made on the deck before the
+        // undo landed in the engine: they are not shared, and the engine is rebuilt from the
+        // replica (craft-live does the same for its own history steps).
+        let first = edits.iter().position(|e| matches!(e, DeckEdit::Undo | DeckEdit::Redo)).unwrap_or(edits.len());
+        let (now, later) = edits.split_at(first);
+        let mut updates = self.commands(replica, now)?;
+        if self.map.partial {
+            return Ok(updates);
+        }
+        // Restores and Undo or Redo run in the order they were asked for (L6 review M4).
+        self.restores(replica, now, &mut updates)?;
+        let doc = self.map.doc;
+        if later.iter().any(|e| matches!(e, DeckEdit::Command(c) if c.doc == doc)) {
+            self.map.resync_after = true;
+            self.map.notices.push(Notice { text: AFTER_UNDO_TEXT.to_owned(), restore: None });
+        }
+        for e in later {
+            let redo = match e {
+                DeckEdit::Undo => false,
+                DeckEdit::Redo => true,
+                DeckEdit::Restore(_) => {
+                    self.restores(replica, std::slice::from_ref(e), &mut updates)?;
+                    continue;
+                }
+                _ => continue,
+            };
+            self.history(replica, redo, &mut updates)?;
+            if self.map.partial {
+                break;
+            }
+        }
+        Ok(updates)
+    }
+
+    /// Undo (`redo` false) or redo my latest command: one new group of its own.
+    fn history(&mut self, replica: &mut DeckDoc, redo: bool, updates: &mut Vec<Vec<u8>>) -> Result<(), LocalError> {
+        let m = &mut *self.map;
+        let Some(g) = m.undo.take(redo) else { return Ok(()) };
+        // Kept to put back when nothing could be written (L6 review M2).
+        let kept = g.clone();
+        let ran = match crate::undo::run(replica, g, redo, &m.uid) {
+            Ok(r) => r,
+            Err(e) => {
+                m.undo.untake(redo, kept);
+                if updates.is_empty() {
+                    return Err(LocalError::Failed(e.error.to_string()));
+                }
+                m.partial = true;
+                return Ok(());
+            }
+        };
+        if ran.skipped > 0 {
+            m.notices.push(Notice { text: UNDO_SKIPPED_TEXT.to_owned(), restore: None });
+        }
+        m.partial |= ran.partial;
+        for (t, del) in &ran.dels {
+            if *del {
+                m.tombs.dead.insert(*t);
+            } else {
+                m.tombs.revived(*t);
+            }
+        }
+        let mut shapes = BTreeSet::new();
+        for w in &ran.inverse.writes {
+            if let crate::doc::KeyRef::Shape(id, _) = &w.key {
+                shapes.insert(*id);
+            }
+        }
+        // The shapes whose text it changed are written to as well (L6 review M7).
+        shapes.extend(ran.texts.iter().filter_map(|t| if let TextTarget::Shape(id) = t { Some(*id) } else { None }));
+        for u in &ran.updates {
+            let w = wire_of(u);
+            if w > WIRE_LIMIT {
+                // A text undo is one yrs update; it is not cut (L6 review M5, L8 tests the edge).
+                log::warn!("deckcraft-live: an undo update of {w} bytes is past the wire limit");
+            }
+        }
+        let slides = ran.inverse.slides.clone();
+        if !ran.updates.is_empty() {
+            m.sent.push(SentGroup {
+                slides: slides.iter().copied().collect(),
+                shapes: shapes.iter().copied().collect(),
+                updates: ran.updates.len(),
+                wire: ran.updates.iter().map(|u| wire_of(u)).max().unwrap_or(0),
+                bound: ran.bound,
+            });
+            m.tombs.wrote(slides.iter().copied(), shapes.iter().copied());
+        }
+        m.touched.whole.extend(slides);
+        m.undo.done(redo, ran.inverse);
+        updates.extend(ran.updates);
+        Ok(())
+    }
+
+    /// The shared commands of a batch (no Undo or Redo among them).
+    fn commands(&mut self, replica: &mut DeckDoc, edits: &[DeckEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
         let m = &mut *self.map;
         let ours: Vec<&deckcraft_engine::Edited> =
             edits.iter().filter_map(|e| if let DeckEdit::Command(c) = e { Some(c.as_ref()) } else { None }).filter(|c| c.doc == m.doc).collect();
@@ -338,12 +443,6 @@ impl DeckApp<'_> {
             if let Some(why) = unshared(&c.before, &c.after) {
                 m.refused = Some(why.to_owned());
                 return Err(LocalError::Refused(why.to_owned()));
-            }
-        }
-        for e in edits {
-            if matches!(e, DeckEdit::Undo | DeckEdit::Redo) {
-                // Per-user undo comes with L6.
-                m.notices.push(Notice { text: NOT_YET_TEXT.to_owned(), restore: None });
             }
         }
         let plans: Vec<_> = ours.iter().map(|c| plan(replica, c, m.space, &m.uid)).collect();
@@ -384,6 +483,8 @@ impl DeckApp<'_> {
                 continue;
             }
             let before = updates.len();
+            // One command, one undo step, however many updates carry it (L4 review M3).
+            let mut g = Group { slides: p.slides.clone(), ..Group::default() };
             for part in parts {
                 let (texts, keys): (Vec<_>, Vec<_>) = part.into_iter().partition(|w| matches!(w, crate::split::PlannedWrite::Text { .. }));
                 // Key writes untracked, the text in one tracked transaction (Ruling D4).
@@ -393,20 +494,29 @@ impl DeckApp<'_> {
                     }
                     match replica.write(tracked, |t| {
                         for w in &ws {
-                            w.write(t);
+                            g.write_noted(t, w);
                         }
                         Ok(())
                     }) {
-                        Ok(u) => updates.push(u),
+                        Ok(u) => {
+                            updates.push(u);
+                            if tracked {
+                                g.text_items += 1;
+                            }
+                        }
                         Err(e) => {
                             // Whatever was written goes out; the engine is rebuilt from the replica.
                             if let Some(u) = e.update {
                                 updates.push(u);
+                                if tracked {
+                                    g.text_items += 1;
+                                }
                             }
                             log::warn!("deckcraft-live: a local write was refused: {}", e.error);
                             if updates.is_empty() {
                                 return Err(LocalError::Failed(e.error.to_string()));
                             }
+                            m.undo.record(g);
                             m.partial = true;
                             return Ok(updates);
                         }
@@ -452,9 +562,9 @@ impl DeckApp<'_> {
                 wire: updates.iter().skip(before).map(|u| wire_of(u)).max().unwrap_or(0),
                 bound,
             });
+            m.undo.record(g);
             m.touched.whole.extend(p.slides.iter().copied());
         }
-        self.restores(replica, edits, &mut updates)?;
         Ok(updates)
     }
 }
@@ -472,9 +582,14 @@ impl LiveApp<Deck> for DeckApp<'_> {
     }
 
     fn landed(&mut self) -> Landed {
+        let resync = std::mem::take(&mut self.map.resync_after);
         if std::mem::take(&mut self.map.partial) {
             self.map.touched = Targets::default();
             return Landed::Partial;
+        }
+        if resync {
+            self.map.touched = Targets::default();
+            return Landed::Resync;
         }
         Landed::Done
     }
@@ -529,6 +644,8 @@ impl LiveApp<Deck> for DeckApp<'_> {
         self.map.tombs.pending.clear();
         self.map.tombs.recent.clear();
         self.map.tombs.reseed = true;
+        // The replaced replica's undo items are gone with it.
+        self.map.undo.clear();
         self.map.held = Targets::default();
         self.map.held_since = None;
         self.map.touched = Targets::default();

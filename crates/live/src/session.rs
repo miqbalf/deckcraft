@@ -163,6 +163,8 @@ impl<H: Hub> DeckLive<H> {
             unmerged: None,
             scene: crate::presence::Scene::default(),
             mine: None,
+            undo: crate::undo::UndoLog::default(),
+            resync_after: false,
         };
         let mut live =
             DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false, closed: false, wall: None };
@@ -180,11 +182,16 @@ impl<H: Hub> DeckLive<H> {
         let q = self.core.queue();
         session.set_edit_observer(self.map.doc, Some(Box::new(move |e: Edited| q.push(DeckEdit::Command(Box::new(e))))));
         let q = self.core.queue();
+        let offer = self.map.undo.offer();
+        // Undo and Redo go through the edit queue to the mapping's own log (Ruling D4), never
+        // craft-live's `history_hook`. The answer says whether my log had a step at the last
+        // flush (D4 review M5); the step itself is taken at the next flush, and the engine
+        // changes when it lands (D4 review M6).
         session.set_live_undo_hook(
             self.map.doc,
             Some(Box::new(move |redo| {
                 q.push(if redo { DeckEdit::Redo } else { DeckEdit::Undo });
-                true
+                offer.has(redo)
             })),
         );
         self.clear_history(session);
@@ -303,11 +310,17 @@ impl<H: Hub> DeckLive<H> {
     /// ends the link itself: craft-live hands them over only for the breaks it makes in a pump
     /// (L5 review I1).
     ///
-    /// Nothing is kept while Live: what was sent is on the wire and will be ordered (re-review
-    /// N2); nor once Broken: craft-live hands the edits over at every break that drops them, and
-    /// its count stays above 0 for the rest of the session (re-review N1).
+    /// Nothing is kept while Live and really connected: what was sent is on the wire and will be
+    /// ordered (re-review N2). The status only refreshes in a pump, so a link that dropped since
+    /// the last pump still reads Live; then the edits never left and are kept (re-review 2 I2).
+    /// craft-live does not hand them over later: its pump takes `was_broken` before it starts,
+    /// so the end this session makes itself is never followed by a hand-over. Nothing is kept
+    /// once Broken: craft-live hands the edits over at every break it makes, and its count stays
+    /// above 0 for the rest of the session (re-review N1).
     fn keep_unconfirmed(&mut self) {
-        if matches!(self.core.status(), LiveStatus::Live { .. } | LiveStatus::Broken(_) | LiveStatus::ReadOnly) {
+        let status = self.core.status();
+        let sent = matches!(status, LiveStatus::Live { .. }) && self.core.live().connected();
+        if sent || matches!(status, LiveStatus::Broken(_) | LiveStatus::ReadOnly) {
             return;
         }
         if self.core.live().unconfirmed_edits() == 0 {
@@ -557,6 +570,18 @@ impl<H: Hub> DeckLive<H> {
     /// The commands sent since the last call, one group each however many updates it took.
     pub fn take_sent(&mut self) -> Vec<SentGroup> {
         std::mem::take(&mut self.map.sent)
+    }
+
+    /// Whether Undo has a command of mine to take back (U1 greys Undo from this, D4 review M5).
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        self.map.undo.can_undo()
+    }
+
+    /// Whether Redo has an undone command of mine to bring back.
+    #[must_use]
+    pub fn can_redo(&self) -> bool {
+        self.map.undo.can_redo()
     }
 
     /// Remote changes are waiting for a drag or a composition to end.

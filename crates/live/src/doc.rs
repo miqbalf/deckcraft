@@ -614,17 +614,20 @@ impl DeckDoc {
         }
     }
 
-    /// Undo this replica's last tracked (text) transaction; the update to send.
-    pub fn undo_text(&mut self) -> Option<Vec<u8>> {
+    /// Undo this replica's last tracked (text) transaction: the update to send and the texts it
+    /// changed (L6 review I2: the engine rebuilds their slides, and an undo that reached past
+    /// the expected texts is noticed).
+    pub fn undo_text(&mut self) -> Option<(Vec<u8>, Vec<TextTarget>)> {
         let u = self.y.undo();
-        self.settle();
-        u
+        let seen = self.settle();
+        u.map(|u| (u, texts_in(&seen)))
     }
 
-    pub fn redo_text(&mut self) -> Option<Vec<u8>> {
+    /// Redo this replica's last undone text transaction, as [`DeckDoc::undo_text`].
+    pub fn redo_text(&mut self) -> Option<(Vec<u8>, Vec<TextTarget>)> {
         let u = self.y.redo();
-        self.settle();
-        u
+        let seen = self.settle();
+        u.map(|u| (u, texts_in(&seen)))
     }
 
     fn changes(seen: Vec<Seen>) -> Vec<DeckChange> {
@@ -854,6 +857,18 @@ impl DeckTxn<'_> {
         }
     }
 
+    /// Remove a latest-wins key (an undo back to "absent", L6). Never a whole entry: entries are
+    /// only ever tombstoned.
+    pub fn unset(&mut self, key: &KeyRef) {
+        let (target, k) = match key {
+            KeyRef::Slide(id, k) => (Tomb::Slide(*id), k),
+            KeyRef::Shape(id, k) => (Tomb::Shape(*id), k),
+        };
+        if let Some(m) = self.entry(target) {
+            m.remove(&mut self.txn, k);
+        }
+    }
+
     fn entry(&mut self, target: Tomb) -> Option<MapRef> {
         let m = match target {
             Tomb::Slide(id) => Roots::entry(&self.roots.slides, &self.txn, id.0),
@@ -864,6 +879,22 @@ impl DeckTxn<'_> {
         }
         m
     }
+}
+
+/// The texts among what the observers saw.
+fn texts_in(seen: &[Seen]) -> Vec<TextTarget> {
+    let mut out = Vec::new();
+    for s in seen {
+        let t = match s {
+            Seen::Text(id) => TextTarget::Shape(*id),
+            Seen::Notes(id) => TextTarget::Notes(*id),
+            Seen::Slide(_) | Seen::Shape(_) | Seen::Meta => continue,
+        };
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
 }
 
 fn push_seen(sink: &Mutex<Vec<Seen>>, found: Vec<Seen>) {
