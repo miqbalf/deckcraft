@@ -349,6 +349,7 @@ fn block_ids_are_in_the_block_and_distinct() {
     for _ in 0..crate::IdBlock::PER_SPACE {
         let id = p.alloc_id().expect("id inside the block");
         assert!(crate::is_live_minted(id), "{id:#x} is live-minted");
+        assert_eq!((id & !crate::LIVE_ID_BASE) >> 16, 7, "{id:#x} is in space 7");
         assert!(seen.insert(id), "{id:#x} handed out twice");
     }
     assert_eq!(p.alloc_id(), None, "a used-up block refuses");
@@ -397,4 +398,30 @@ fn id_block_is_not_saved_and_not_compared() {
     let without = Presentation { id_block: None, ..p.clone() };
     assert_eq!(p, without, "presentations differing only in the block are equal");
     assert_eq!(p, Presentation { id_block: crate::IdBlock::new(9), ..p.clone() });
+}
+
+/// Without a block, ids stay below the live range: `fix_next_id` and `note_id` skip live-minted
+/// ids, and `alloc_id` refuses rather than reach `LIVE_ID_BASE` (D2 concern 1, L3 ruling).
+#[test]
+fn block_less_ids_stay_below_the_live_range() {
+    use crate::{LIVE_ID_BASE, Shape, ShapeId, Slide};
+    let live = LIVE_ID_BASE | 3 << 16 | 9;
+    let mut p = Presentation::default();
+    let before = p.next_id;
+    let slide = Slide { id: crate::SlideId(live), shapes: vec![Shape { id: ShapeId(live + 1), ..Default::default() }], ..Default::default() };
+    p.slides.push(std::sync::Arc::new(slide));
+    p.fix_next_id();
+    assert!(p.next_id < LIVE_ID_BASE, "{:#x}", p.next_id);
+    assert!(p.next_id >= before);
+    p.note_id(live);
+    assert!(p.next_id < LIVE_ID_BASE);
+    p.note_id(p.next_id + 5);
+    let n = p.next_id;
+    assert_eq!(p.alloc_id(), Some(n + 1));
+    p.next_id = LIVE_ID_BASE - 2;
+    assert_eq!(p.alloc_id(), Some(LIVE_ID_BASE - 1));
+    assert_eq!(p.alloc_id(), None, "the next id would be in the live range");
+    p.next_id = LIVE_ID_BASE + 4;
+    p.fix_next_id();
+    assert!(p.next_id < LIVE_ID_BASE, "a counter already in the live range is brought back");
 }

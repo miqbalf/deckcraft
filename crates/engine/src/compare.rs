@@ -398,7 +398,7 @@ pub fn adopt(doc: &mut Presentation, rev: &Presentation, slide: &Slide, replacin
                 // Keeps the revision's id, so later ids must start past it.
                 doc_at.insert(id, doc.media.len());
                 doc.media.push(m.clone());
-                doc.next_id = doc.next_id.max(id.0);
+                doc.note_id(id.0);
             }
             Some(_) => {
                 let before = doc.media.len();
@@ -460,7 +460,7 @@ pub fn adopt(doc: &mut Presentation, rev: &Presentation, slide: &Slide, replacin
     }
     let mut max = 0;
     max_shape_id(&sl.shapes, &mut max);
-    doc.next_id = doc.next_id.max(max);
+    doc.note_id(max);
     // Layout.
     if doc.layout(sl.layout).is_none() {
         let name = rev.layout(slide.layout).map(|(_, l)| l.name.clone());
@@ -492,7 +492,7 @@ pub fn adopt(doc: &mut Presentation, rev: &Presentation, slide: &Slide, replacin
             if doc.slides.iter().any(|s| s.id == sl.id) || sl.id.0 == 0 {
                 sl.id = SlideId(doc.alloc_id().ok_or_else(|| crate::cmd::bad("review.accept", crate::cmd::NO_ID_SPACE))?);
             }
-            doc.next_id = doc.next_id.max(sl.id.0);
+            doc.note_id(sl.id.0);
         }
     }
     Ok(sl)

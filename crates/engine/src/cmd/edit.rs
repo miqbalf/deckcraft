@@ -309,7 +309,7 @@ fn bring_media(cmd: &str, doc: &mut deckcraft_model::Presentation, media: &[deck
             None => {
                 // Keeps the foreign id, so later ids must start past it.
                 doc.media.push(m.clone());
-                doc.next_id = doc.next_id.max(m.id.0);
+                doc.note_id(m.id.0);
             }
             Some(x) if x.data == m.data => {}
             Some(_) => {

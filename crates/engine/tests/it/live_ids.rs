@@ -29,7 +29,8 @@ fn exhausted_block_refuses_new_shapes_and_keeps_the_deck() {
         ("edit.paste", json!({})),
     ] {
         let before = s.doc().expect("doc").doc.clone();
-        assert!(s.execute(cmd, &params).is_err(), "{cmd} refuses with a used-up block");
+        let err = s.execute(cmd, &params).expect_err("refused with a used-up block");
+        assert!(err.to_string().contains(deckcraft_engine::cmd::NO_ID_SPACE), "{cmd}: {err}");
         assert!(Arc::ptr_eq(&before, &s.doc().expect("doc").doc), "{cmd} keeps the deck");
     }
 }

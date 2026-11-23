@@ -1149,31 +1149,46 @@ impl Presentation {
         if let Some(block) = &self.id_block {
             return block.alloc();
         }
-        let next = self.next_id.max(1).checked_add(1)?;
+        // Without a block, ids stay below LIVE_ID_BASE, so they never meet a live peer's.
+        let next = self.next_id.max(1).checked_add(1).filter(|n| *n < LIVE_ID_BASE)?;
         self.next_id = next;
         Some(next)
     }
-    /// Make sure `next_id` is above every id in use (after loading a file).
+    /// Raise `next_id` past `id`, an id kept from elsewhere (a paste, a revision). Live-minted
+    /// ids (at or above [`LIVE_ID_BASE`]) are left out: they are a peer's block, not this deck's
+    /// counter, and counting them would make block-less ids run into the live range.
+    pub fn note_id(&mut self, id: u32) {
+        if id < LIVE_ID_BASE {
+            self.next_id = self.next_id.max(id);
+        }
+    }
+    /// Make sure `next_id` is above every id in use (after loading a file). Ids at or above
+    /// [`LIVE_ID_BASE`] are live peers' (see [`Self::note_id`]) and are left out.
     pub fn fix_next_id(&mut self) {
-        let mut m = self.next_id;
+        let mut m = if self.next_id < LIVE_ID_BASE { self.next_id } else { 0 };
+        let m_max = |m: &mut u32, id: u32| {
+            if id < LIVE_ID_BASE {
+                *m = (*m).max(id);
+            }
+        };
         for s in &self.slides {
-            m = m.max(s.id.0);
-            walk(&s.shapes, &mut |sh, _| m = m.max(sh.id.0));
+            m_max(&mut m, s.id.0);
+            walk(&s.shapes, &mut |sh, _| m_max(&mut m, sh.id.0));
         }
         for ma in &self.masters {
-            m = m.max(ma.id.0);
-            walk(&ma.shapes, &mut |sh, _| m = m.max(sh.id.0));
+            m_max(&mut m, ma.id.0);
+            walk(&ma.shapes, &mut |sh, _| m_max(&mut m, sh.id.0));
             for l in &ma.layouts {
-                m = m.max(l.id.0);
-                walk(&l.shapes, &mut |sh, _| m = m.max(sh.id.0));
+                m_max(&mut m, l.id.0);
+                walk(&l.shapes, &mut |sh, _| m_max(&mut m, sh.id.0));
             }
         }
         for md in &self.media {
-            m = m.max(md.id.0);
+            m_max(&mut m, md.id.0);
         }
         for extra in [self.notes_master.as_deref(), self.handout_master.as_deref()].into_iter().flatten() {
-            m = m.max(extra.id.0);
-            walk(&extra.shapes, &mut |sh, _| m = m.max(sh.id.0));
+            m_max(&mut m, extra.id.0);
+            walk(&extra.shapes, &mut |sh, _| m_max(&mut m, sh.id.0));
         }
         self.next_id = m;
     }
