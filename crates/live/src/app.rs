@@ -7,15 +7,15 @@ use std::sync::Arc;
 use craft_live::{Landed, LiveApp, LocalError};
 use deckcraft_engine::{EngineError, Session};
 use deckcraft_model::{IdBlock, Presentation, ShapeId, SlideId};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::doc::{DeckChange, DeckDoc, TextTarget, Tomb};
 use crate::gate::NOT_YET_TEXT;
-use crate::kind::{CaretPos, Deck, DeckCaret, DeckEdit, DeckPos};
+use crate::kind::{Deck, DeckCaret, DeckEdit};
 use crate::local::plan;
 use crate::net::unshared;
+use crate::presence::{Mine, Scene};
 use crate::remote::{Targets, land, whole};
-use crate::schema::{id_key, parse_key};
 use crate::session::Notice;
 use crate::split::{PlannedWrite, plan_split};
 use crate::tomb::{Tombs, inside, line_for, restore_writes, slide_of, slide_tomb, tomb_over, tombstoned};
@@ -44,9 +44,6 @@ fn wire_of(update: &[u8]) -> usize {
 
 /// Why a single change too large for one update is refused (L3 review M5).
 pub const EDIT_TOO_LARGE_TEXT: &str = "This change is too large to share while editing live";
-
-/// The most shapes of a caret kept.
-const CARET_SHAPES_MAX: usize = 256;
 
 /// One command as it went out: what it touched and how many updates it took (a large command is
 /// cut into several updates that are still one command, one undo step).
@@ -93,6 +90,10 @@ pub(crate) struct Mapping {
     pub tombs: Tombs,
     /// Local edits craft-live was about to drop, for [`crate::DeckLive::take_unmerged`].
     pub unmerged: Option<Unmerged>,
+    /// What the other editors' carets resolve against (L7).
+    pub scene: Scene,
+    /// This window's text caret as sticky indexes, for remote text edits (L7, spec H2).
+    pub mine: Option<Mine>,
 }
 
 /// The engine session and the mapping, for one call.
@@ -137,7 +138,7 @@ impl DeckApp<'_> {
             self.hold(all);
             return Ok(());
         }
-        match land(self.session, self.map.doc, &self.map.base, replica, &all) {
+        match land(self.session, self.map.doc, &self.map.base, replica, &all, &mut self.map.mine) {
             Ok(()) => {
                 self.map.held_since = None;
                 Ok(())
@@ -173,6 +174,11 @@ impl DeckApp<'_> {
 
     fn current(&self) -> Option<&deckcraft_engine::DocState> {
         self.session.documents().iter().find(|d| d.uid == self.map.doc)
+    }
+
+    /// The carets' scene gets the engine's deck as it is now.
+    fn see(&self) {
+        self.map.scene.set_deck(self.current().map(|d| d.doc.clone()));
     }
 
     /// Whether this window's selection or caret is in `t`: a selected shape or the text caret
@@ -279,10 +285,9 @@ impl DeckApp<'_> {
         }
         Ok(())
     }
-}
 
-impl LiveApp<Deck> for DeckApp<'_> {
-    fn local(&mut self, replica: &mut DeckDoc, edits: &[DeckEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
+    /// The mapping of a batch of local edits (see [`LiveApp::local`]).
+    fn local_inner(&mut self, replica: &mut DeckDoc, edits: &[DeckEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
         let m = &mut *self.map;
         let ours: Vec<&deckcraft_engine::Edited> =
             edits.iter().filter_map(|e| if let DeckEdit::Command(c) = e { Some(c.as_ref()) } else { None }).filter(|c| c.doc == m.doc).collect();
@@ -414,6 +419,19 @@ impl LiveApp<Deck> for DeckApp<'_> {
         self.restores(replica, edits, &mut updates)?;
         Ok(updates)
     }
+}
+
+impl LiveApp<Deck> for DeckApp<'_> {
+    fn local(&mut self, replica: &mut DeckDoc, edits: &[DeckEdit]) -> Result<Vec<Vec<u8>>, LocalError> {
+        self.map.scene.set_view(Some(replica.view()));
+        let updates = self.local_inner(replica, edits)?;
+        // The engine's text and the replica's agree again: my caret's sticky indexes, for a remote
+        // change landing before the next pump ends.
+        if let Some(st) = self.current() {
+            self.map.mine = crate::presence::mine(st, replica);
+        }
+        Ok(updates)
+    }
 
     fn landed(&mut self) -> Landed {
         if std::mem::take(&mut self.map.partial) {
@@ -429,16 +447,19 @@ impl LiveApp<Deck> for DeckApp<'_> {
         self.install((*before).clone())
     }
 
-    fn received(&mut self, _replica: &mut DeckDoc, changes: Vec<DeckChange>) -> (Vec<DeckChange>, Vec<Vec<u8>>) {
+    fn received(&mut self, replica: &mut DeckDoc, changes: Vec<DeckChange>) -> (Vec<DeckChange>, Vec<Vec<u8>>) {
+        self.map.scene.set_view(Some(replica.view()));
         (changes, Vec::new())
     }
 
     fn apply(&mut self, replica: &DeckDoc, changes: &[DeckChange]) -> Result<(), String> {
+        self.map.scene.set_view(Some(replica.view()));
         self.note_deletes(replica, changes);
         self.land_or_hold(replica, Targets::from_changes(changes))
     }
 
     fn resync(&mut self, replica: &DeckDoc) -> Result<(), String> {
+        self.map.scene.set_view(Some(replica.view()));
         // The whole deck replaces what was held and touched.
         self.map.held = Targets::default();
         self.map.touched = Targets::default();
@@ -465,6 +486,9 @@ impl LiveApp<Deck> for DeckApp<'_> {
         self.map.held = Targets::default();
         self.map.held_since = None;
         self.map.touched = Targets::default();
+        // The old replica's sticky indexes name nothing in the new one; a resync follows.
+        self.map.scene.set_view(None);
+        self.map.mine = None;
         self.set_space(space);
     }
 
@@ -490,24 +514,8 @@ impl LiveApp<Deck> for DeckApp<'_> {
     }
 
     fn caret(&self, payload: &Value) -> Option<DeckCaret> {
-        let slide = SlideId(parse_key(payload.get("s")?.as_str()?)?);
-        let shapes: Vec<ShapeId> = payload
-            .get("sh")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().take(CARET_SHAPES_MAX).filter_map(|v| v.as_str().and_then(parse_key)).map(ShapeId).collect())
-            .unwrap_or_default();
-        let caret = payload.get("c").and_then(|c| {
-            let id = parse_key(c.get("id")?.as_str()?)?;
-            let target =
-                if c.get("n").and_then(Value::as_bool) == Some(true) { TextTarget::Notes(SlideId(id)) } else { TextTarget::Shape(ShapeId(id)) };
-            let pair = |k: &str| -> Option<(usize, usize)> {
-                let a = c.get(k)?.as_array()?;
-                Some((usize::try_from(a.first()?.as_u64()?).ok()?, usize::try_from(a.get(1)?.as_u64()?).ok()?))
-            };
-            Some(CaretPos { target, anchor: pair("a")?, head: pair("h")? })
-        });
-        let mut c = DeckCaret { slide, shapes, caret, pos: DeckPos { slide: None, shapes: Vec::new(), caret: None } };
-        resolve(self.current().map(|d| d.doc.as_ref()), &mut c).then_some(c)
+        self.see();
+        self.map.scene.caret(payload)
     }
 
     fn unmerged(&mut self, state: &[u8], edits: usize) {
@@ -517,40 +525,7 @@ impl LiveApp<Deck> for DeckApp<'_> {
     }
 
     fn follow(&self, carets: &mut HashMap<String, DeckCaret>) {
-        let p = self.current().map(|d| d.doc.clone());
-        carets.retain(|_, c| resolve(p.as_deref(), c));
+        self.see();
+        carets.retain(|_, c| self.map.scene.follow(c));
     }
-}
-
-/// Where a caret is now: its slide's index, its shapes that are still there, its text position
-/// inside the text. False when its slide is gone.
-fn resolve(p: Option<&Presentation>, c: &mut DeckCaret) -> bool {
-    let Some(p) = p else { return false };
-    let Some((i, s)) = p.slides.iter().enumerate().find(|(_, s)| s.id == c.slide) else { return false };
-    let shapes: Vec<ShapeId> = c.shapes.iter().copied().filter(|id| s.shape(*id).is_some()).collect();
-    let caret = c.caret.as_ref().and_then(|k| {
-        let body = match &k.target {
-            TextTarget::Notes(id) if *id == s.id => &s.notes,
-            TextTarget::Notes(_) => return None,
-            TextTarget::Shape(id) => s.shape(*id)?.text.as_ref()?,
-        };
-        let fit = |(pi, ci): (usize, usize)| {
-            let pi = pi.min(body.paragraphs.len().saturating_sub(1));
-            (pi, ci.min(body.paragraphs.get(pi).map_or(0, |x| x.char_len())))
-        };
-        Some(CaretPos { target: k.target.clone(), anchor: fit(k.anchor), head: fit(k.head) })
-    });
-    c.pos = DeckPos { slide: Some(i), shapes, caret };
-    true
-}
-
-/// The caret payload for this window's selection, in stable ids.
-pub(crate) fn caret_payload(st: &deckcraft_engine::DocState) -> Option<Value> {
-    let slide = st.doc.slides.get(st.selection.slide)?;
-    let shapes: Vec<String> = st.selection.shapes.iter().take(CARET_SHAPES_MAX).map(|id| id_key(id.0)).collect();
-    let caret = st.selection.text.as_ref().filter(|t| t.cell.is_none()).map(|t| {
-        let id = if t.notes { slide.id.0 } else { t.shape.0 };
-        json!({"id": id_key(id), "n": t.notes, "a": [t.anchor.0, t.anchor.1], "h": [t.caret.0, t.caret.1]})
-    });
-    Some(json!({"s": id_key(slide.id.0), "sh": shapes, "c": caret}))
 }

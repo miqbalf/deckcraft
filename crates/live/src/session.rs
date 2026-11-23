@@ -10,7 +10,7 @@ use deckcraft_engine::{Edited, Session};
 use deckcraft_model::Presentation;
 use serde_json::{Value, json};
 
-use crate::app::{DeckApp, Mapping, SentGroup, caret_payload};
+use crate::app::{DeckApp, Mapping, SentGroup};
 use crate::doc::{DeckDoc, DeckSeed, Tomb};
 use crate::gate::{Class, MEDIA_TEXT, NOT_YET_TEXT, class};
 use crate::kind::{Deck, DeckEdit, DeckPos};
@@ -154,6 +154,8 @@ impl<H: Hub> DeckLive<H> {
             name,
             tombs: Tombs::default(),
             unmerged: None,
+            scene: crate::presence::Scene::default(),
+            mine: None,
         };
         let mut live =
             DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false, closed: false, wall: None };
@@ -161,6 +163,7 @@ impl<H: Hub> DeckLive<H> {
             live.share_clock();
         }
         live.bind(session);
+        live.see(session);
         Ok(live)
     }
 
@@ -219,6 +222,9 @@ impl<H: Hub> DeckLive<H> {
         self.pumps += 1.0;
         let now = self.now();
         self.end_stale_twist(session, now);
+        // What landed after the last pump (held changes, the touched slides) is where the other
+        // editors' carets are drawn from now on.
+        self.see(session);
         let peers = {
             let mut app = DeckApp { session, map: &mut self.map, now };
             self.core.pump(&mut app)
@@ -242,6 +248,8 @@ impl<H: Hub> DeckLive<H> {
             self.core.end(craft_live::BROKEN);
         }
         self.clear_history(session);
+        self.see(session);
+        self.keep_mine(session);
         if self.core.live().doc().is_some_and(DeckDoc::needs_resync) && !self.resync_told {
             // craft-live cannot replace a replica in place at this pin (L3): end the link, and a
             // reopened file builds a new one.
@@ -257,6 +265,27 @@ impl<H: Hub> DeckLive<H> {
                 None => local_now().unwrap_or_else(|| epoch_ms(now)),
             });
         }
+    }
+
+    /// The carets' scene: the engine's deck and the replica as they are now (L7).
+    fn see(&self, session: &Session) {
+        let st = session.documents().iter().find(|d| d.uid == self.map.doc);
+        self.map.scene.set_deck(st.map(|d| d.doc.clone()));
+        self.map.scene.set_view(self.core.live().doc().map(DeckDoc::view));
+    }
+
+    /// This window's text caret as sticky indexes, taken again when it moved or the text
+    /// changed, so a remote text edit keeps it on the same characters (spec H2).
+    fn keep_mine(&mut self, session: &Session) {
+        let Some(st) = session.documents().iter().find(|d| d.uid == self.map.doc) else { return };
+        let Some(sel) = st.selection.text.as_ref() else {
+            self.map.mine = None;
+            return;
+        };
+        if self.map.mine.as_ref().is_some_and(|m| m.revision == st.revision && crate::presence::same_caret(&m.sel, sel)) {
+            return;
+        }
+        self.map.mine = self.core.live().doc().and_then(|d| crate::presence::mine(st, d));
     }
 
     /// The deletes found in this pump, as notices with Restore and the deleter's display name.
@@ -382,10 +411,11 @@ impl<H: Hub> DeckLive<H> {
         self.core.editable()
     }
 
-    /// Tells the room where this window's selection and caret are (held to five a second).
+    /// Tells the room where this window's selection and caret are, in stable ids and sticky text
+    /// indexes ([`crate::presence`]; held to five a second). A read-only window sends it too.
     pub fn send_selection(&mut self, session: &Session) {
         let Some(st) = session.documents().iter().find(|d| d.uid == self.map.doc) else { return };
-        if let Some(p) = caret_payload(st) {
+        if let Some(p) = crate::presence::payload(st, self.core.live().doc()) {
             self.core.send_presence(p);
         }
     }

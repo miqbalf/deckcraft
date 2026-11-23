@@ -565,25 +565,13 @@ impl DeckDoc {
     /// for bytes that do not decode or name another text.
     #[must_use]
     pub fn resolve(&self, target: TextTarget, sticky: &[u8]) -> Option<u32> {
-        let s = StickyIndex::decode_v1(sticky).ok()?;
-        let txn = self.y.doc().transact();
-        let t = self.roots.text(&txn, &target)?;
-        let off = s.get_offset(&txn)?;
-        let own: &craft_collab::yrs::branch::Branch = t.as_ref();
-        if off.branch != craft_collab::yrs::branch::BranchPtr::from(own) {
-            return None;
-        }
-        let kind = self.y.doc().offset_kind();
-        let mut sum = 0u32;
-        let mut n = 0u32;
-        for u in units(&txn, &t, kind) {
-            if sum >= off.index {
-                break;
-            }
-            sum += u;
-            n += 1;
-        }
-        Some(n)
+        resolve_in(self.y.doc(), &self.roots, &target, sticky)
+    }
+
+    /// A read handle on this replica's document that the presence code keeps between calls
+    /// (L7): it reads the same document until the replica is replaced.
+    pub(crate) fn view(&self) -> DocView {
+        DocView { doc: self.y.doc().clone(), roots: self.roots.clone() }
     }
 
     /// The encoded state's size, to hold against [`MAX_SEED_BYTES`](crate::schema::MAX_SEED_BYTES).
@@ -902,6 +890,96 @@ fn seen_in(txn: &TransactionMut, e: &Event, slides: bool) -> Vec<Seen> {
             }
         }
         Some(PathSegment::Index(_)) => Vec::new(),
+    }
+}
+
+/// Where `sticky` is now in `target`'s text, in chars of the flat form. None while a write is
+/// open, or for bytes that do not decode or name another text.
+fn resolve_in(doc: &Doc, roots: &Roots, target: &TextTarget, sticky: &[u8]) -> Option<u32> {
+    let s = StickyIndex::decode_v1(sticky).ok()?;
+    let txn = doc.try_transact().ok()?;
+    let t = roots.text(&txn, target)?;
+    let off = s.get_offset(&txn)?;
+    let own: &craft_collab::yrs::branch::Branch = t.as_ref();
+    if off.branch != craft_collab::yrs::branch::BranchPtr::from(own) {
+        return None;
+    }
+    let kind = doc.offset_kind();
+    let mut sum = 0u32;
+    let mut n = 0u32;
+    for u in units(&txn, &t, kind) {
+        if sum >= off.index {
+            break;
+        }
+        sum += u;
+        n += 1;
+    }
+    Some(n)
+}
+
+/// A read handle on a replica's document, kept by the presence code between the calls that hand
+/// it the replica: it resolves sticky indexes and says whether an entry is deleted. Reads are
+/// quiet (a peer's junk is logged by the replica's own index, not here).
+#[derive(Clone)]
+pub(crate) struct DocView {
+    doc: Doc,
+    roots: Roots,
+}
+
+/// What a replica knows of a slide or shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Known {
+    /// No entry (yet): an id from an update that has not arrived.
+    Unknown,
+    Live,
+    /// A tombstone, or (for a shape) under one: a group above it or its slide.
+    Dead,
+}
+
+impl DocView {
+    /// See [`DeckDoc::resolve`].
+    pub(crate) fn resolve(&self, target: &TextTarget, sticky: &[u8]) -> Option<u32> {
+        resolve_in(&self.doc, &self.roots, target, sticky)
+    }
+
+    /// What the document knows of `t` now. A shape's chain of parents and its slide are read too.
+    pub(crate) fn known(&self, t: Tomb) -> Known {
+        let Ok(txn) = self.doc.try_transact() else { return Known::Unknown };
+        let deleted = |m: &MapRef| {
+            let by = matches!(read_by(m, &txn), Read::Good(Some(_)));
+            match read_bool(m, &txn, DEL) {
+                Read::Good(b) => b,
+                Read::Absent => false,
+                Read::Junk => by,
+            }
+        };
+        let slide_dead = |id: u32| Roots::entry(&self.roots.slides, &txn, id).is_some_and(|m| deleted(&m));
+        match t {
+            Tomb::Slide(id) => match Roots::entry(&self.roots.slides, &txn, id.0) {
+                None => Known::Unknown,
+                Some(m) if deleted(&m) => Known::Dead,
+                Some(_) => Known::Live,
+            },
+            Tomb::Shape(id) => {
+                let Some(first) = Roots::entry(&self.roots.shapes, &txn, id.0) else { return Known::Unknown };
+                let mut at = Some(first);
+                for _ in 0..MAX_DEPTH {
+                    let Some(m) = at.take() else { break };
+                    if deleted(&m) {
+                        return Known::Dead;
+                    }
+                    if let Read::Good(p) = read_id(&m, &txn, PARENT)
+                        && p != 0
+                    {
+                        at = Roots::entry(&self.roots.shapes, &txn, p);
+                    }
+                }
+                match Roots::entry(&self.roots.shapes, &txn, id.0).map(|m| read_id(&m, &txn, SLIDE)) {
+                    Some(Read::Good(s)) if slide_dead(s) => Known::Dead,
+                    _ => Known::Live,
+                }
+            }
+        }
     }
 }
 

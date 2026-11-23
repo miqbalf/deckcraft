@@ -14,6 +14,7 @@ use crate::build::{Rebuild, deck_from_doc};
 use crate::doc::{DeckChange, DeckDoc};
 use crate::kind::{from_flat, to_flat};
 use crate::local::region;
+use crate::presence::{Mine, place, same_caret};
 use crate::text::edit_ops;
 
 /// What to bring the engine in line with.
@@ -120,7 +121,18 @@ fn body_of(p: &Presentation, slide: SlideId, c: &TextSel) -> Option<Vec<Paragrap
 
 /// Bring document `doc` of `session` in line with `t` in `replica`. Err([`EngineError::RemoteBusy`])
 /// while a drag or a composition is open: the caller holds `t`.
-pub(crate) fn land(session: &mut Session, doc: u64, base: &Presentation, replica: &DeckDoc, t: &Targets) -> Result<(), EngineError> {
+///
+/// The local text caret stays on the same characters: by its sticky indexes (`mine`, spec H2) when
+/// they were taken for the caret the engine has now, otherwise by the minimal edit around it.
+/// After a sticky placement, `mine` is kept for the placed caret.
+pub(crate) fn land(
+    session: &mut Session,
+    doc: u64,
+    base: &Presentation,
+    replica: &DeckDoc,
+    t: &Targets,
+    mine: &mut Option<Mine>,
+) -> Result<(), EngineError> {
     let Some(st) = session.documents().iter().find(|d| d.uid == doc) else { return Err(EngineError::NoDocument) };
     let at = st.doc.slides.get(st.selection.slide).map(|s| s.id);
     // The caret and the body it is in now (table cells are the engine's to clamp).
@@ -129,18 +141,33 @@ pub(crate) fn land(session: &mut Session, doc: u64, base: &Presentation, replica
         let old = body_of(&st.doc, slide, &c)?;
         Some((c, slide, old))
     });
-    session.apply_remote(doc, |ctx| {
+    let sticky = mine.as_ref().filter(|m| caret.as_ref().is_some_and(|(c, slide, _)| m.slide == *slide && same_caret(c, &m.sel))).cloned();
+    let mut placed = None;
+    let r = session.apply_remote(doc, |ctx| {
         rebuild_into(ctx, base, replica, t);
         if let Some((c, slide, old)) = caret {
             match body_of(ctx.presentation(), slide, &c) {
                 Some(new) if new == old => {}
                 // Always placed when its text changed (D4 review M2).
-                Some(new) => ctx.set_text(Some(moved_caret(&c, &old, &new))),
+                Some(new) => {
+                    let by_sticky = sticky.as_ref().and_then(|m| place(m, replica, &new));
+                    placed.clone_from(&by_sticky);
+                    ctx.set_text(Some(by_sticky.unwrap_or_else(|| moved_caret(&c, &old, &new))));
+                }
                 None => ctx.set_text(None),
             }
         }
         Ok(())
-    })
+    });
+    // The sticky indexes still name the caret the engine now shows (as it clamped it).
+    let now = session.documents().iter().find(|d| d.uid == doc).and_then(|d| d.selection.text.clone());
+    if r.is_ok()
+        && placed.is_some()
+        && let (Some(sel), Some(m)) = (now, mine.as_mut())
+    {
+        m.sel = sel;
+    }
+    r
 }
 
 fn rebuild_into(ctx: &mut RemoteCtx, base: &Presentation, replica: &DeckDoc, t: &Targets) {

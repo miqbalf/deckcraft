@@ -16,6 +16,7 @@ pub mod kind;
 mod local;
 pub mod net;
 pub mod order;
+pub mod presence;
 mod remote;
 pub mod schema;
 pub mod seed;
