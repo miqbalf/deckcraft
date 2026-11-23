@@ -37,9 +37,16 @@ pub(super) fn find_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bo
                     let mut p = q.clone();
                     p["with"] = json!(d.get("with", ""));
                     p["at"] = at;
-                    if app.run_engine("text.replace", &p).is_ok() {
-                        let n = d.get("next", "1").parse::<usize>().unwrap_or(1);
-                        d.fields.insert("next".into(), n.saturating_sub(1).to_string());
+                    match app.run_engine("text.replace", &p) {
+                        Ok(_) => {
+                            let n = d.get("next", "1").parse::<usize>().unwrap_or(1);
+                            d.fields.insert("next".into(), n.saturating_sub(1).to_string());
+                        }
+                        // The live presentation refused the edit: say why, not "not found".
+                        Err(e) if app.live_refusal("text.replace").is_some() => {
+                            d.fields.insert("status".into(), e);
+                        }
+                        Err(_) => {}
                     }
                 }
                 find_next = true;
@@ -49,6 +56,7 @@ pub(super) fn find_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bo
                 p["with"] = json!(d.get("with", ""));
                 let msg = match app.run_engine("text.replace", &p) {
                     Ok(v) => format!("Replaced {} occurrence(s).", v.get("replaced").and_then(Value::as_u64).unwrap_or(0)),
+                    Err(e) if app.live_refusal("text.replace").is_some() => e,
                     Err(_) => format!("DeckCraft can't find “{text}”."),
                 };
                 d.fields.insert("status".into(), msg);

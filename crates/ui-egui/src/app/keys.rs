@@ -256,16 +256,17 @@ impl SlideApp {
         let editing = st.selection.text.is_some();
         let nudges = !editing && !st.selection.shapes.is_empty();
         let arrow = matches!(name, "Left" | "Right" | "Up" | "Down");
-        if mods.cmd {
-            let spec = deckcraft_engine::command_specs()
-                .iter()
-                .find(|s| s.shortcut.is_some_and(|k| deckcraft_engine::keys::shortcut_matches(k, name, mods)));
-            return match spec {
-                Some(s) => self.live_refusal(s.id),
-                // Moving the caret or the view by word or page edits nothing.
-                None if arrow || matches!(name, "Home" | "End" | "PageUp" | "PageDown") => None,
-                None => Some(why),
-            };
+        // Every registered shortcut, with or without Cmd (Shift+F3, Alt+Shift+V), goes by its
+        // command's gate.
+        let spec =
+            deckcraft_engine::command_specs().iter().find(|s| s.shortcut.is_some_and(|k| deckcraft_engine::keys::shortcut_matches(k, name, mods)));
+        match spec.map(|s| self.live_refusal(s.id)) {
+            Some(Some(refused)) => return Some(refused),
+            Some(None) if mods.cmd => return None,
+            // Moving the caret or the view by word or page edits nothing.
+            None if mods.cmd => return (!arrow && !matches!(name, "Home" | "End" | "PageUp" | "PageDown")).then_some(why),
+            // A key the engine also uses itself (an arrow nudges shapes): the rules below.
+            _ => {}
         }
         ((arrow && nudges) || (editing && name == "Tab")).then_some(why)
     }

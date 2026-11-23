@@ -601,3 +601,125 @@ fn each_shortcut_edit_is_its_own_group() {
     let sent = room.h.state_mut().live.as_mut().unwrap().live_mut().take_sent();
     assert_eq!(sent.len(), 2, "one group per duplicate");
 }
+
+/// Asks the window to close (the close button, Cmd+Q or `app.quit`) for one frame.
+fn request_close(h: &mut Harness<'_, SlideApp>) -> bool {
+    h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+    h.run_steps(1);
+    h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.clear();
+    h.output()
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .is_some_and(|o| o.commands.iter().any(|c| matches!(c, egui::ViewportCommand::CancelClose)))
+}
+
+/// Closing with unsaved changes asks first; Cancel keeps the window in the room (R1).
+#[test]
+fn a_cancelled_quit_keeps_the_live_session() {
+    let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
+    let app = room.h.state_mut();
+    app.run("slide.go", json!({"index": 1})).unwrap();
+    app.run("text.edit", json!({"id": alpha.0})).unwrap();
+    app.run("text.insert", json!({"text": "unsaved"})).unwrap();
+    room.h.run_steps(1);
+    assert!(room.h.state().session.active().unwrap().is_dirty(), "there is something to save");
+    assert!(request_close(&mut room.h), "the close waits for the question");
+    assert!(room.h.state().dialog.as_ref().is_some_and(|d| d.id == "quit"), "the save question is asked");
+    room.h.run_steps(1);
+    room.h.get_by_role_and_label(Role::Button, "Cancel").click();
+    room.h.run_steps(2);
+    assert!(room.h.state().dialog.is_none(), "the question was answered");
+    assert!(room.h.state().live.is_some(), "the window is still in the room");
+}
+
+/// A close that goes ahead ends the session and offers its copy; a copy not taken holds the close
+/// back once, says that live editing ended, and the next close goes ahead.
+#[test]
+fn closing_the_window_offers_the_copy_once() {
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, cancelling());
+    room.h.state_mut().pending_unmerged.push(copy());
+    // The save question was answered (Save or Don't Save), so the close goes ahead.
+    room.h.state_mut().quit_confirmed = true;
+    room.h.run_steps(1);
+    assert!(request_close(&mut room.h), "held back for the copy");
+    assert!(room.h.state().live.is_none(), "the window left the room");
+    assert_eq!(room.h.state().pending_unmerged, vec![copy()], "the copy still waits");
+    let said = room.h.state().toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+    assert!(said.contains(super::live::LIVE_ENDED_TEXT), "the person is told live editing ended: {said}");
+    assert!(!request_close(&mut room.h), "the next close goes ahead");
+}
+
+/// On exit every waiting copy is offered: one the person cancels does not stop the next.
+#[test]
+fn finish_live_offers_every_copy() {
+    let log = HostLog::default();
+    let asked = HostLog::default();
+    let (w, a) = (log.clone(), asked.clone());
+    let services = Services {
+        // The person cancels the first Save dialog and saves the second copy.
+        pick_save: Some(Box::new(move |name: &str| {
+            a.0.borrow_mut().push((name.to_owned(), Vec::new()));
+            name.contains("1500").then(|| format!("/saved/{name}"))
+        })),
+        write: Some(Box::new(move |path: &str, b: &[u8]| {
+            w.0.borrow_mut().push((path.to_owned(), b.to_vec()));
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, services);
+    let second = ("Deck (unmerged 2026-11-23 1500).pptx".to_owned(), deck(true));
+    room.h.state_mut().pending_unmerged.extend([copy(), second.clone()]);
+    room.h.state_mut().finish_live();
+    assert!(room.h.state().live.is_none(), "the session ended");
+    let names: Vec<String> = asked.got().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, vec![copy().0, second.0.clone()], "each copy was offered once");
+    assert_eq!(log.got(), vec![(format!("/saved/{}", second.0), second.1)], "the second was written");
+    assert_eq!(room.h.state().pending_unmerged, vec![copy()], "the cancelled one still waits");
+}
+
+/// Closing the live presentation with file.close hands a waiting copy to the host.
+#[test]
+fn file_close_hands_a_waiting_copy_over() {
+    let log = HostLog::default();
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, downloading(&log));
+    room.h.state_mut().pending_unmerged.push(copy());
+    let _ = room.h.state_mut().run("file.close", json!({}));
+    room.h.run_steps(2);
+    assert!(room.h.state().live.is_none(), "the window left the room");
+    assert_eq!(log.got(), vec![copy()], "the waiting copy was handed over");
+}
+
+/// A viewer's Replace All is refused with the live reason, not "can't find".
+#[test]
+fn find_replace_says_the_live_refusal() {
+    let mut room = Room::new(&deck(false), Access::Read, Access::Edit);
+    room.h.state_mut().dialog = Some(crate::dialogs::Dialog::new("find"));
+    room.h.state_mut().dialog.as_mut().unwrap().fields.extend([
+        ("text".to_owned(), "alpha".to_owned()),
+        ("with".to_owned(), "x".to_owned()),
+        ("replace".to_owned(), "1".to_owned()),
+    ]);
+    room.h.run_steps(2);
+    room.h.get_by_role_and_label(Role::Button, "Replace All").click();
+    room.h.run_steps(2);
+    let status = room.h.state().dialog.as_ref().and_then(|d| d.fields.get("status").cloned()).unwrap_or_default();
+    assert_eq!(status, READ_ONLY_TEXT, "the reason, not a missing match");
+}
+
+/// Shift+F3 (change case, no Cmd) is refused for a viewer before it runs.
+#[test]
+fn a_shortcut_without_cmd_is_gated_too() {
+    let mut room = Room::new(&deck(false), Access::Read, Access::Edit);
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("edit.select", json!({"ids": [alpha.0]})).unwrap();
+    room.h.run_steps(1);
+    let before = room.ann_doc();
+    let shift = egui::Modifiers { shift: true, ..Default::default() };
+    room.h.input_mut().events.push(egui::Event::Key { key: egui::Key::F3, physical_key: None, pressed: true, repeat: false, modifiers: shift });
+    room.h.run_steps(1);
+    assert!(*before == *room.ann_doc(), "no change");
+    assert_eq!(room.h.state_mut().fresh_status().as_deref(), Some(READ_ONLY_TEXT), "refused up front, with the reason");
+}

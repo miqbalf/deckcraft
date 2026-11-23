@@ -75,9 +75,22 @@ pub const ON_SLIDE_NAME: &str = "{name} on slide {slide}";
 /// Why nothing is taken once the link to the room ended for a reason the window has no line for.
 pub const LINK_ENDED_TEXT: &str = "The link to the other editors ended. Reopen the file to keep editing.";
 
+/// Said when the window left the room (a close that was then held back for a waiting copy).
+pub const LIVE_ENDED_TEXT: &str = "Live editing has ended in this window.";
+
 /// Every English key this module draws, for the translation report.
-pub const ENGLISH_KEYS: &[&str] =
-    &[RESTORE_LABEL, VIEWING_TEXT, LIVE_TEXT, SAVE_COPY_TEXT, DISMISS_TEXT, SELECTION_NAME, CURSOR_NAME, ON_SLIDE_NAME, LINK_ENDED_TEXT];
+pub const ENGLISH_KEYS: &[&str] = &[
+    RESTORE_LABEL,
+    VIEWING_TEXT,
+    LIVE_TEXT,
+    SAVE_COPY_TEXT,
+    DISMISS_TEXT,
+    SELECTION_NAME,
+    CURSOR_NAME,
+    ON_SLIDE_NAME,
+    LINK_ENDED_TEXT,
+    LIVE_ENDED_TEXT,
+];
 
 /// The translation lookup for an English key. DeckCraft has no translation catalogue yet, so this
 /// is English as it stands; every live line goes through it so a catalogue needs one change.
@@ -325,10 +338,35 @@ impl SlideApp {
     /// once. The desktop shell calls it in `on_exit`.
     pub fn finish_live(&mut self) {
         self.end_live();
-        let mut left = self.pending_unmerged.len();
-        while left > 0 {
-            self.offer_unmerged();
-            left -= 1;
+        let waiting = std::mem::take(&mut self.pending_unmerged);
+        for (name, bytes) in waiting {
+            if !self.save_unmerged(&name, &bytes) {
+                self.pending_unmerged.push((name, bytes));
+            }
+        }
+    }
+
+    /// The window is about to close: the live session ends, and waiting copies are offered.
+    /// When one was not taken, the close is held back once so the strip can keep offering it,
+    /// and the person is told that live editing has ended.
+    pub(crate) fn close_live_for_quit(&mut self, ctx: &egui::Context) {
+        let was_live = self.live.is_some();
+        self.end_live();
+        if self.pending_unmerged.is_empty() || self.unmerged_close_offered {
+            return;
+        }
+        self.unmerged_close_offered = true;
+        self.finish_live();
+        if !self.pending_unmerged.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            let mut line = String::new();
+            if was_live {
+                line.push_str(tr(LIVE_ENDED_TEXT));
+                line.push(' ');
+            }
+            line.push_str(tr(deckcraft_live::UNMERGED_TEXT));
+            self.notify(line.clone());
+            self.set_status(line);
         }
     }
 
@@ -448,15 +486,21 @@ impl SlideApp {
             .zip(self.slide_rect)
             .map(|(p, r)| deckcraft_geom::Point::new(f64::from((p.x - r.min.x) / scale), f64::from((p.y - r.min.y) / scale)));
         let Some(at) = here.or(self.last_drag_at) else { return };
-        let ev = deckcraft_engine::PointerEvent {
-            kind: deckcraft_engine::PointerKind::Up,
+        let ev = |kind| deckcraft_engine::PointerEvent {
+            kind,
             x: at.x,
             y: at.y,
             mods: deckcraft_engine::Mods::default(),
             tol: f64::from(4.0 / scale),
             pressure: None,
         };
-        if let Err(e) = self.session.pointer(ev) {
+        // A move, resize or rotate takes its point from Drag, not Up: move there first.
+        let r = if self.last_drag_at == Some(at) {
+            self.session.pointer(ev(deckcraft_engine::PointerKind::Up))
+        } else {
+            self.session.pointer(ev(deckcraft_engine::PointerKind::Drag)).and_then(|_| self.session.pointer(ev(deckcraft_engine::PointerKind::Up)))
+        };
+        if let Err(e) = r {
             self.set_status(e.to_string());
         }
     }
