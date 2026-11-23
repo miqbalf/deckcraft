@@ -380,6 +380,26 @@ impl<H: Hub> DeckLive<H> {
         self.after(session, now);
     }
 
+    /// Ends the link for `reason` when the host says the session is over (the page reopened the
+    /// file in another room, or the ticket lost edit access). Queued edits are flushed first, and
+    /// every edit the room has not confirmed is kept as the unmerged copy, whatever the status
+    /// says: the room is being left, so what was sent to it may never be ordered (U2 review C1).
+    /// Only a link that is already Broken keeps nothing more: craft-live handed its edits over at
+    /// that break. Hosts take the copy with [`DeckLive::take_unmerged`] after the next pump.
+    pub fn end(&mut self, session: &mut Session, reason: &str) {
+        if self.closed || matches!(self.core.status(), LiveStatus::Broken(_)) {
+            return;
+        }
+        self.flush(session);
+        if !matches!(self.core.status(), LiveStatus::Broken(_) | LiveStatus::ReadOnly)
+            && self.core.live().unconfirmed_edits() > 0
+            && let Some(state) = self.replica().map(DeckDoc::state)
+        {
+            self.map.keep_unmerged(state);
+        }
+        self.core.end(reason);
+    }
+
     /// The gate. LOCAL and FREE commands run now, then flush, so each command is shared alone;
     /// NOT_YET and MEDIA commands are refused and the presentation is untouched. A shared
     /// command the safety net refuses is put back, and its reason is the answer.
@@ -634,4 +654,42 @@ fn default_clock() -> Option<Clock> {
 #[cfg(target_arch = "wasm32")]
 fn default_clock() -> Option<Clock> {
     None
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use craft_live::testing::{MemRelay, ROOM};
+    use craft_live::{Access, LiveApp};
+    use deckcraft_engine::Session;
+    use serde_json::json;
+
+    use super::{BaseFile, DeckLive};
+    use crate::app::DeckApp;
+
+    /// The replica replaced by the room's checkpoint takes my undo steps with it (L6 review M8).
+    /// craft-live resets a replica only while it holds none of my edits (a snapshot after an
+    /// edit gives the replica up), so the reset is called here directly, as a guard.
+    #[test]
+    fn a_reset_clears_my_undo_steps() {
+        let mut s = Session::with_new();
+        s.execute("shape.insert", &json!({"preset": "rect", "rect": [60.0, 60.0, 200.0, 80.0], "text": "alpha"})).expect("insert");
+        let bytes = deckcraft_engine::cmd::file::save_bytes(&s.active().expect("deck").doc, "pptx").expect("save");
+        let relay = MemRelay::new();
+        let mut session = Session::new();
+        let base = BaseFile { bytes: &bytes, name: "Deck.pptx", expected_sha256: None };
+        let mut live = DeckLive::start(relay.connect("ann", "Ann", true), ROOM, &base, Access::Edit, "ann", &mut session).expect("start");
+        for _ in 0..4 {
+            live.pump(&mut session);
+        }
+        live.run(&mut session, "shape.insert", &json!({"preset": "rect", "rect": [300.0, 60.0, 100.0, 80.0]})).expect("insert live");
+        for _ in 0..4 {
+            live.pump(&mut session);
+        }
+        assert!(live.can_undo(), "a step to undo before the reset");
+        let space = live.map.space;
+        let mut app = DeckApp { session: &mut session, map: &mut live.map, now: 0.0 };
+        app.reset(space);
+        assert!(!live.can_undo(), "the steps went with the replaced replica");
+        assert!(!live.can_redo());
+    }
 }

@@ -340,3 +340,27 @@ fn commands_made_right_after_undo_in_one_batch_are_dropped_and_said() {
     }
     r.assert_converged();
 }
+
+/// The Resync after commands dropped behind an Undo (L6 review M8): the window is rebuilt from the
+/// replica at once, also where the Undo itself changed nothing (a dropped move of another shape),
+/// the notice is said once, and the next edit is shared as usual.
+#[test]
+fn the_window_is_rebuilt_after_commands_dropped_behind_an_undo() {
+    let mut r = Room::new(basic(), 2, 15);
+    let (a, b) = (find(&r.peers[0].doc(), "alpha"), find(&r.peers[0].doc(), "beta"));
+    let x0 = x_of(&r, 0, b);
+    let s = &mut r.peers[0].session;
+    s.execute("shape.fill", &json!({"ids": [a.0], "color": "#C00000"})).expect("fill");
+    s.execute("edit.undo", &json!({})).expect("undo");
+    s.execute("shape.move", &json!({"ids": [b.0], "dx": 40.0})).expect("move");
+    r.pump(0);
+    assert!(x_of(&r, 0, b) == x0, "the dropped move is gone from the window after the same pump");
+    assert!(*r.peers[0].doc() == r.peers[0].rebuilt(), "the window shows the replica");
+    r.settle();
+    let said = r.peers[0].notices.iter().filter(|n| n.text == AFTER_UNDO_TEXT).count();
+    assert_eq!(said, 1, "told once");
+    r.peers[0].run("shape.move", json!({"ids": [b.0], "dx": 20.0})).expect("move again");
+    r.settle();
+    assert!(x_of(&r, 1, b) > x0, "the next edit is shared");
+    r.assert_converged();
+}

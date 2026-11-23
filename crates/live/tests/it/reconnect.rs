@@ -289,3 +289,50 @@ fn a_drop_and_rejoin_between_pumps_loses_no_edit() {
     let kept = copy.as_ref().is_some_and(|(_, bytes)| copy_text(bytes, a).contains("rejoined"));
     assert!(reached || kept, "the edit reached the room ({reached}) or is in the copy ({kept})");
 }
+
+/// The page reopened the file in another room while this window was offline and typing: the
+/// host ends the session, and the offline edits come back as the copy (U2 review C1).
+#[test]
+fn a_host_end_while_offline_keeps_the_offline_edits() {
+    let mut r = Room::new(basic(), 2, 23);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.drop_link(0);
+    r.pump_all();
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit");
+    r.peers[0].run("text.insert", json!({"text": "offline "})).expect("type");
+    let p = &mut r.peers[0];
+    p.live.end(&mut p.session, "The live session was restarted. Reopen the file.");
+    r.pump(0);
+    let (_, bytes) = r.peers[0].live.take_unmerged().expect("the copy");
+    assert!(copy_text(&bytes, a).contains("offline"), "the copy holds the offline text");
+    assert!(matches!(r.peers[0].live.status(), LiveStatus::Broken(_)), "the link ended");
+}
+
+/// The same with the link up: an edit sent to a room that is being left may never be ordered,
+/// so it is kept too.
+#[test]
+fn a_host_end_right_after_an_edit_keeps_it() {
+    let mut r = Room::new(basic(), 2, 24);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit");
+    r.peers[0].run("text.insert", json!({"text": "unconfirmed "})).expect("type");
+    let p = &mut r.peers[0];
+    p.live.end(&mut p.session, "Your access changed. Reopen the file.");
+    r.pump(0);
+    let (_, bytes) = r.peers[0].live.take_unmerged().expect("the copy");
+    assert!(copy_text(&bytes, a).contains("unconfirmed"), "the copy holds the edit");
+}
+
+/// A host end after everything was confirmed makes no copy.
+#[test]
+fn a_host_end_with_nothing_unconfirmed_makes_no_copy() {
+    let mut r = Room::new(basic(), 2, 25);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit");
+    r.peers[0].run("text.insert", json!({"text": "shared "})).expect("type");
+    r.settle();
+    let p = &mut r.peers[0];
+    p.live.end(&mut p.session, "Your access changed. Reopen the file.");
+    r.pump(0);
+    assert!(r.peers[0].live.take_unmerged().is_none(), "no copy");
+}
