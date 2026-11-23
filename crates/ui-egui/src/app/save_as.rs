@@ -171,10 +171,25 @@ impl SlideApp {
             let count = self.session.active().map_or(0, |d| d.doc.slides.len());
             let cut = path.rfind(['/', '\\']).map_or(0, |i| i + 1);
             let (dir, base) = path.split_at(cut);
+            let targets: Vec<String> = Self::numbered(base, format, count).into_iter().map(|name| format!("{dir}{name}")).collect();
+            // The dialog asked only about the name typed; the numbered files are other names.
+            let existing = if count > 1 { targets.iter().filter(|t| std::path::Path::new(t).exists()).count() } else { 0 };
+            if existing > 0 {
+                let question = if existing == 1 {
+                    format!("1 of the {count} files this export writes in {dir} already exists. Replace it?")
+                } else {
+                    format!("{existing} of the {count} files this export writes in {dir} already exist. Replace them?")
+                };
+                let replace = self.services.confirm.as_mut().is_some_and(|ask| ask(&question));
+                if !replace {
+                    self.set_status(format!("Nothing was exported: {existing} of the files already exist in {dir}"));
+                    return false;
+                }
+            }
             params["all"] = json!(false);
-            for (slide, name) in Self::numbered(base, format, count).into_iter().enumerate() {
+            for (slide, target) in targets.into_iter().enumerate() {
                 params["slide"] = json!(slide);
-                params["path"] = json!(format!("{dir}{name}"));
+                params["path"] = json!(target);
                 if self.run("file.export", params.clone()).is_err() {
                     return false;
                 }

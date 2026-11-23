@@ -140,11 +140,10 @@ fn alt_f_arrows_enter_and_esc_drive_the_side_menu() {
     h.key_press(Key::ArrowDown);
     h.run_steps(2);
     assert_eq!(page(&h), Some(Page::Info));
-    // Save runs Save (File › Save As makes copies): with no Save dialog here nothing is
-    // written and the page stays.
+    // A presentation that was never saved goes to Save As, as in PowerPoint.
     h.key_press(Key::Enter);
     h.run_steps(2);
-    assert_eq!(page(&h), Some(Page::Info));
+    assert_eq!(page(&h), Some(Page::SaveAs));
     // Up from the top wraps to Options at the bottom.
     for _ in 0..20 {
         h.key_press(Key::ArrowUp);
@@ -271,8 +270,8 @@ fn open_lists_recent_files_and_opens_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Save of a presentation without a file asks where with the Save dialog and the presentation
-/// takes the new file; Export writes copies (PDF, another file type) and leaves the
+/// Save on a presentation without a file goes to Save As, whose Save writes a copy (Save As =
+/// Export); Ctrl+S gives it a file; Export writes copies (PDF, another file type) and leaves the
 /// presentation's own file alone.
 #[test]
 fn save_as_and_export_run_the_file_commands() {
@@ -281,15 +280,22 @@ fn save_as_and_export_run_the_file_commands() {
     let mut h = harness(SlideApp::new(Session::with_new(), services));
     let title = h.state().session.active().unwrap().title();
 
-    // Save on a presentation without a file asks where (plain Save, not the Save As copy).
+    // Save on a presentation without a file goes to Save As; its Save writes a .pptx copy.
     h.state_mut().run("app.backstage", json!({})).unwrap();
     h.run_steps(3);
     click_nav(&h, "Save");
     h.run_steps(3);
+    assert_eq!(page(&h), Some(Page::SaveAs));
+    click_on_page(&h, "Save");
+    h.run_steps(3);
+    assert!(dir.join(format!("{title}.pptx")).is_file(), "a PowerPoint copy by default");
+    assert_eq!(h.state().session.active().unwrap().path, None, "a copy: still untitled");
+    assert!(h.state().backstage.is_none(), "the copy returns to the slide");
+    // Ctrl+S (plain Save) gives it a file.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::S);
+    h.run_steps(3);
     let pptx = dir.join(format!("{title}.deckcraft")).to_string_lossy().to_string();
-    assert!(std::path::Path::new(&pptx).is_file(), "saved as .deckcraft, as Save suggests");
     assert_eq!(h.state().session.active().unwrap().path.as_deref(), Some(pptx.as_str()));
-    assert!(h.state().backstage.is_none(), "a save returns to the slide");
 
     // Export › Create PDF Document.
     h.state_mut().run("app.backstage", json!({"page": "export"})).unwrap();
@@ -308,7 +314,7 @@ fn save_as_and_export_run_the_file_commands() {
     h.run_steps(3);
     assert!(dir.join(format!("{title}.txt")).is_file());
     assert_eq!(h.state().session.active().unwrap().path.as_deref(), Some(pptx.as_str()), "exports are copies");
-    assert_eq!(*asked.borrow(), vec![format!("{title}.deckcraft"), format!("{title}.pdf"), format!("{title}.txt")]);
+    assert_eq!(*asked.borrow(), vec![format!("{title}.pptx"), format!("{title}.deckcraft"), format!("{title}.pdf"), format!("{title}.txt")]);
 
     // Save with a file saves in place and goes back.
     h.state_mut().run("slide.new", json!({})).unwrap();
@@ -318,7 +324,7 @@ fn save_as_and_export_run_the_file_commands() {
     h.run_steps(3);
     assert!(!h.state().session.active().unwrap().is_dirty());
     assert!(h.state().backstage.is_none());
-    assert_eq!(asked.borrow().len(), 3, "no Save dialog for a presentation with a file");
+    assert_eq!(asked.borrow().len(), 4, "no Save dialog for a presentation with a file");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -459,7 +465,7 @@ fn host_close_prompt_keeps_the_presentation_when_the_save_fails() {
     for fail in [true, false] {
         let services = Services {
             host_save: Some(Box::new(move |_: &str, _: &[u8], _: bool, _: Option<&str>| if fail { Err("the page is gone".into()) } else { Ok(()) })),
-            download: Some(Box::new(|_: &str, _: &str, _: &[u8]| {})),
+            download: Some(Box::new(|_: &str, _: &str, _: &[u8]| Ok(()))),
             ..Default::default()
         };
         let mut h = harness(SlideApp::new(Session::with_new(), services));
@@ -493,7 +499,10 @@ fn host_save_as_downloads_a_copy_and_returns_to_the_slide() {
             saves.borrow_mut().push((name.to_string(), save_as));
             Ok(())
         })),
-        download: Some(Box::new(move |name: &str, _: &str, _: &[u8]| dl.borrow_mut().push(name.to_string()))),
+        download: Some(Box::new(move |name: &str, _: &str, _: &[u8]| {
+            dl.borrow_mut().push(name.to_string());
+            Ok(())
+        })),
         ..Default::default()
     };
     let mut app = SlideApp::new(Session::new(), services);

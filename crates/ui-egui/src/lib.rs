@@ -54,6 +54,8 @@ mod ime_hooks;
 pub mod panels;
 mod services;
 mod state;
+mod web_host;
+pub use web_host::{HostHooks, connect_host, download_mime, download_name};
 
 #[cfg(test)]
 use app::{OBJECTS_MARKER, system_clipboard_text, web_image_files};
@@ -73,8 +75,8 @@ pub use panels::selpane;
 pub use panels::thumbs;
 pub use ribbon::qat;
 pub use services::{
-    DownloadFn, HostAnswer, HostSaveFn, HostSaves, HostShareFn, HostShares, Inbox, InboxEvent, InboxFile, OpenAsyncFn, PickFn, PickSaveCopyFn,
-    ReadFn, Services, ShareRouteFn, WriteFn,
+    ConfirmFn, DownloadFn, HostAnswer, HostSaveFn, HostSaves, HostShareFn, HostShares, Inbox, InboxEvent, InboxFile, OpenAsyncFn, PickFn,
+    PickSaveCopyFn, ReadFn, Services, ShareRouteFn, WriteFn,
 };
 use state::{FilePlace, FilePurpose, ImeDescriptorKey, ImeDestination, ImeTerminalStamp};
 pub use state::{RECENT_MAX, UiState, ViewMode, ZOOM_RANGE};

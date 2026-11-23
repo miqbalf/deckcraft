@@ -25,7 +25,10 @@ type Downloads = Rc<RefCell<Vec<(String, String, Vec<u8>)>>>;
 fn web(downloads: &Downloads) -> Services {
     let log = downloads.clone();
     Services {
-        download: Some(Box::new(move |name: &str, mime: &str, b: &[u8]| log.borrow_mut().push((name.into(), mime.into(), b.to_vec())))),
+        download: Some(Box::new(move |name: &str, mime: &str, b: &[u8]| {
+            log.borrow_mut().push((name.into(), mime.into(), b.to_vec()));
+            Ok(())
+        })),
         ..Default::default()
     }
 }
@@ -326,7 +329,7 @@ fn the_pages_and_the_dialog_download_through_the_one_save_as() {
 
     h.state_mut().run("app.exportDialog", json!({})).unwrap();
     h.run_steps(2);
-    h.get_by_label("Outline/RTF (*.rtf)").click_accesskit();
+    h.get_by_label("Outline/RTF (.rtf)").click_accesskit();
     h.run_steps(2);
     h.key_press(Key::Enter);
     h.run_steps(3);
@@ -335,8 +338,9 @@ fn the_pages_and_the_dialog_download_through_the_one_save_as() {
     assert!(doc_state(h.state()).2, "still unsaved");
 }
 
-/// Plain Save is unchanged: a presentation that was never saved asks where on the desktop and
-/// the file picked becomes its file, also from the File tab's Save (which used to open Save As).
+/// Plain Save is unchanged: on the desktop the File tab's Save on a presentation that was never
+/// saved goes to File › Save As (as before), and Ctrl+S asks where and the file picked becomes its
+/// file. Inside a page that keeps the files, the File tab's Save goes to the page.
 #[test]
 fn plain_save_of_an_untitled_presentation_still_takes_the_file() {
     let dir = temp_dir("untitled");
@@ -346,8 +350,121 @@ fn plain_save_of_an_untitled_presentation_still_takes_the_file() {
     let mut app = deck(services, None);
     app.open_backstage(backstage::Page::Info);
     let next = backstage::act(&mut app, backstage::Nav::Save, backstage::Page::Info);
-    assert_eq!(next, None, "saved: back to the slide");
+    assert_eq!(next, Some(backstage::Page::SaveAs), "the File tab's Save goes to Save As, as before");
+    app.save();
     assert_eq!(app.session.active().unwrap().path.as_deref(), Some(picked.as_str()));
     assert!(!app.session.active().unwrap().is_dirty());
+
+    let downloads = Downloads::default();
+    let posted = Rc::new(Cell::new(0));
+    let mut app = SlideApp::new(Session::new(), hosted(&downloads, &posted));
+    app.start_for_host().unwrap();
+    app.run("slide.new", json!({})).unwrap();
+    app.open_backstage(backstage::Page::Info);
+    let next = backstage::act(&mut app, backstage::Nav::Save, backstage::Page::Info);
+    assert_ne!(next, Some(backstage::Page::SaveAs), "inside the page Save is not a download");
+    assert_eq!(posted.get(), 1, "the untitled presentation went to the page");
+    assert!(downloads.borrow().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Desktop many-file export: the dialog confirms only the base name, so when numbered files
+/// already exist the user is asked once, with how many; No writes nothing, Yes replaces them, and
+/// without a way to ask nothing is replaced.
+#[test]
+fn many_file_desktop_export_asks_before_replacing_numbered_files() {
+    let dir = temp_dir("many-exist");
+    std::fs::write(dir.join("Deck-2.png"), b"old").unwrap();
+    let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+    for answer in [None, Some(false), Some(true)] {
+        let mut services = desktop(&dir, Some("Deck.png"), &Asked::default());
+        if let Some(yes) = answer {
+            let log = asked.clone();
+            services.confirm = Some(Box::new(move |q: &str| {
+                log.borrow_mut().push(q.to_string());
+                yes
+            }));
+        }
+        let mut app = deck(services, Some("Deck.pptx"));
+        let wrote = app.save_as_copy("pngAll", json!({}));
+        assert_eq!(wrote, answer == Some(true), "{answer:?}");
+        let kept = std::fs::read(dir.join("Deck-2.png")).unwrap() == b"old";
+        assert_eq!(kept, answer != Some(true), "{answer:?}: Deck-2.png replaced only on Yes");
+        assert_eq!(dir.join("Deck-1.png").exists(), answer == Some(true), "{answer:?}: nothing written unless Yes");
+    }
+    assert_eq!(asked.borrow().len(), 2, "asked once per export");
+    assert!(asked.borrow().iter().all(|q| q.contains("1 of the 2 files")), "{:?}", asked.borrow());
+
+    // No numbered file there: nothing to ask.
+    let fresh = temp_dir("many-fresh");
+    let mut services = desktop(&fresh, Some("Deck.jpg"), &Asked::default());
+    services.confirm = Some(Box::new(|_: &str| panic!("nothing to replace")));
+    assert!(deck(services, Some("Deck.pptx")).save_as_copy("jpegAll", json!({})));
+    assert!(fresh.join("Deck-1.jpg").is_file() && fresh.join("Deck-2.jpg").is_file());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&fresh);
+}
+
+/// The web shell's page wiring (`connect_host`, what `deckcraft-web`'s bridge calls): after it,
+/// Save As, every export and Print still download and nothing is posted to the page; only plain
+/// Save and Share reach it.
+#[test]
+fn the_page_wiring_posts_only_save_and_share() {
+    let downloads = Downloads::default();
+    let (posted, shared) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+    let mut services = web(&downloads);
+    let (p, sh) = (posted.clone(), shared.clone());
+    let saves = crate::HostSaves::default();
+    saves.set_confirms();
+    let shares = crate::HostShares::default();
+    shares.set();
+    crate::connect_host(
+        &mut services,
+        crate::HostHooks {
+            post_save: Box::new(move |_: &str, _: &[u8], _: bool, _: Option<&str>| {
+                p.set(p.get() + 1);
+                Ok(())
+            }),
+            post_share: Box::new(move || {
+                sh.set(sh.get() + 1);
+                Ok(())
+            }),
+            saves,
+            shares,
+        },
+    );
+    let mut app = SlideApp::new(Session::new(), services);
+    app.start_for_host().unwrap();
+    let bytes = deckcraft_engine::cmd::file::save_bytes(&Session::with_new().doc().unwrap().doc, "pptx").unwrap();
+    app.open_from_host(Some("Talk.pptx"), &bytes);
+    for id in ids() {
+        assert!(app.save_as_copy(id, json!({})), "{id}");
+    }
+    assert!(app.print_pdf(json!({})));
+    app.run("app.saveAsDialog", json!({"format": "pptx"})).unwrap();
+    assert_eq!(posted.get(), 0, "Save As, exports and Print post nothing");
+    assert!(downloads.borrow().len() > ids().len(), "they download");
+    app.save();
+    assert_eq!(posted.get(), 1, "plain Save goes to the page");
+    app.run("file.share", json!({})).unwrap();
+    assert_eq!(shared.get(), 1, "Share asks the page");
+}
+
+/// A download the browser refuses is reported, not shown as done.
+#[test]
+fn a_failed_download_says_so() {
+    let services = Services { download: Some(Box::new(|_: &str, _: &str, _: &[u8]| Err("blocked".into()))), ..Default::default() };
+    let mut app = deck(services, Some("Deck.pptx"));
+    assert!(!app.save_as_copy("pdf", json!({})));
+    assert!(app.status.as_ref().is_some_and(|(m, _)| m.contains("Couldn't download Deck.pdf") && m.contains("blocked")), "{:?}", app.status);
+}
+
+/// Web downloads get the list's MIME type, the native format's too, and only the file's name.
+#[test]
+fn download_names_and_types() {
+    assert_eq!(crate::download_mime("Talk.deckcraft"), SAVE_AS.get("deckcraft").unwrap().mime);
+    assert_eq!(crate::download_mime("Talk.PPTX"), SAVE_AS.get("pptx").unwrap().mime);
+    assert_eq!(crate::download_mime("notes.md"), craft_share::export::mime_for_ext("md"));
+    assert_eq!(crate::download_name("docs/a\\Talk.pptx"), "Talk.pptx");
+    assert!(!crate::download_name("docs/").is_empty());
 }

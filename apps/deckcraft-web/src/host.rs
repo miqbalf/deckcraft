@@ -52,7 +52,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use craft_web_host::web::{FileData, Host, Message, fetch_font};
-use deckcraft_ui_egui::{HostAnswer, HostSaves, HostShares, Services, SlideApp};
+use deckcraft_ui_egui::{HostAnswer, HostHooks, HostSaves, HostShares, Services, SlideApp, connect_host};
 
 /// The app id in the host messages (`deckcraft:ready`).
 const APP: &str = "deckcraft";
@@ -106,16 +106,18 @@ impl Bridge {
     /// exports and Print keep the web shell's download: they are copies.
     pub fn connect(&self, services: &mut Services, ctx: egui::Context) {
         self.listen(ctx);
-        // The app and the listener share one answer queue.
-        services.host_saves = self.saves.clone();
-        let bridge = self.clone();
-        services.host_save =
-            Some(Box::new(move |name: &str, bytes: &[u8], save_as: bool, id: Option<&str>| bridge.post_save(name, bytes, save_as, id)));
-        // Share (`file.share`): a host that said `share: true` opens Nextcloud's sharing for the
-        // file it opened (`deckcraft:share`); otherwise the app says no Nextcloud is connected.
-        services.host_shares = self.shares.clone();
-        let bridge = self.clone();
-        services.host_share = Some(Box::new(move || bridge.host.post_share()));
+        // Which messages reach the page is decided (and tested natively) in `connect_host`: plain
+        // Save and Share only. The app and the listener share the answer queue and the share flag.
+        let (save, share) = (self.clone(), self.clone());
+        connect_host(
+            services,
+            HostHooks {
+                post_save: Box::new(move |name: &str, bytes: &[u8], save_as: bool, id: Option<&str>| save.post_save(name, bytes, save_as, id)),
+                post_share: Box::new(move || share.host.post_share()),
+                saves: self.saves.clone(),
+                shares: self.shares.clone(),
+            },
+        );
     }
 
     /// `?author=`: the host's name for the user signs new comments.

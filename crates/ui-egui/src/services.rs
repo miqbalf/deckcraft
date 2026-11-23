@@ -9,8 +9,12 @@ pub type PickFn = Box<dyn FnMut(&str) -> Option<String>>;
 /// not applied to whichever document happens to be active.
 pub type OpenAsyncFn = Box<dyn FnMut(&str, u64)>;
 
-/// [`Services::download`]: `(file name, MIME type, bytes)`.
-pub type DownloadFn = Box<dyn FnMut(&str, &str, &[u8])>;
+/// [`Services::download`]: `(file name, MIME type, bytes)`. An error means the browser didn't
+/// take the file; the app says so in the status bar.
+pub type DownloadFn = Box<dyn FnMut(&str, &str, &[u8]) -> Result<(), String>>;
+
+/// [`Services::confirm`]: ask the user a yes/no question (`true` = yes).
+pub type ConfirmFn = Box<dyn FnMut(&str) -> bool>;
 
 /// [`Services::pick_save_copy`]: `(suggested file name, filter name, extension)` → the path
 /// picked in the system Save dialog, or `None` when it was cancelled.
@@ -163,6 +167,9 @@ pub struct Services {
     /// Hand bytes to the user as a named file (browser download, `craft_web_host::web::download`).
     /// Every Save As and Export copy on the web goes here, also inside a page that keeps the files.
     pub download: Option<DownloadFn>,
+    /// Desktop: a yes/no question in a system message box, such as replacing the files of a
+    /// many-file export. Without it the app refuses instead of replacing anything.
+    pub confirm: Option<ConfirmFn>,
     /// Web, framed by a page that keeps the files (`?host=parent`): Save and Save As hand the
     /// presentation to that page instead of downloading it, with whether it is a new file
     /// ([`HostSaveFn`]). Save writes a presentation the page sent back under its own name and

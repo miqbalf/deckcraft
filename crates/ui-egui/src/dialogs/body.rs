@@ -707,15 +707,33 @@ fn dlg_rename_section(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     ok || cancel
 }
 
+/// The Export… dialog's formats, (id, label): every [`crate::SAVE_AS`] format, in the dialog's own
+/// order and with its own labels; the formats it didn't list before keep the list's label.
+pub(crate) fn export_dialog_formats() -> Vec<(&'static str, &'static str)> {
+    const OWN: [(&str, &str); 9] = [
+        ("pdf", "PDF document (.pdf)"),
+        ("png", "PNG images (current slide)"),
+        ("pngAll", "PNG images (all slides)"),
+        ("jpeg", "JPEG image (current slide)"),
+        ("jpegAll", "JPEG images (all slides)"),
+        ("pptx", "PowerPoint Presentation (.pptx)"),
+        ("outline", "Outline (.txt)"),
+        ("gif", "Animated GIF (.gif)"),
+        ("rtf", "Outline/RTF (.rtf)"),
+    ];
+    let rest = crate::SAVE_AS.formats().iter().filter(|f| !OWN.iter().any(|(id, _)| *id == f.id)).map(|f| (f.id, f.label));
+    OWN.into_iter().filter(|(id, _)| crate::SAVE_AS.get(id).is_some()).chain(rest).collect()
+}
+
 /// Export…: the format (every one in [`crate::SAVE_AS`], the File › Save As list) and its options;
 /// Export hands them to [`SlideApp::save_as_copy`].
 /// Returns true when the dialog should close.
 fn dlg_export(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     ui.label("Export the presentation as:");
     let fmt = d.get("fmt", "pdf");
-    for f in crate::SAVE_AS.formats() {
-        if ui.radio(fmt == f.id, f.label).clicked() {
-            d.fields.insert("fmt".into(), f.id.into());
+    for (id, label) in export_dialog_formats() {
+        if ui.radio(fmt == id, label).clicked() {
+            d.fields.insert("fmt".into(), id.into());
         }
     }
     let pdf_layout = d.get("pdfLayout", "slides");

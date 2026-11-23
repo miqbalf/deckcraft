@@ -260,12 +260,17 @@ pub(crate) fn act(app: &mut SlideApp, nav: Nav, current: Page) -> Option<Page> {
     match nav {
         Nav::Page(p) => Some(p),
         Nav::Save => {
-            // A page that keeps the files (`host_save`) saves as the desktop does. A presentation
-            // that was never saved asks where with the Save dialog: File › Save As makes copies.
+            // A page that keeps the files (`host_save`) saves as the desktop does.
             let web = app.services.pick_save.is_none() && app.services.download.is_some() && app.services.host_save.is_none();
+            let has_path = app.session.active().is_some_and(|d| d.path.is_some());
+            if !has_path && !web && app.services.host_save.is_none() {
+                // A presentation that was never saved goes to Save As first, as in PowerPoint.
+                // Inside a page that keeps the files, Save goes to the page: Save As there is a
+                // download, which would leave the page without the file.
+                return Some(Page::SaveAs);
+            }
             app.save();
-            // Saved means a file now holds it: a cancelled dialog leaves an untitled one as it was.
-            let saved = app.session.active().is_some_and(|d| !d.is_dirty() && (d.path.is_some() || app.services.host_save.is_some()));
+            let saved = app.session.active().is_some_and(|d| !d.is_dirty());
             if saved || web { None } else { Some(current) }
         }
         Nav::Share => {

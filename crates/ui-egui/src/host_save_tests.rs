@@ -26,7 +26,10 @@ fn host_app(fail: bool) -> (SlideApp, Got) {
             saves.borrow_mut().push((name.to_string(), save_as, bytes.to_vec()));
             Ok(())
         })),
-        download: Some(Box::new(move |name: &str, _: &str, bytes: &[u8]| downloads.borrow_mut().push((name.to_string(), false, bytes.to_vec())))),
+        download: Some(Box::new(move |name: &str, _: &str, bytes: &[u8]| {
+            downloads.borrow_mut().push((name.to_string(), false, bytes.to_vec()));
+            Ok(())
+        })),
         ..Default::default()
     };
     // Host mode starts as the web shell starts it: an empty presentation for the page's file.

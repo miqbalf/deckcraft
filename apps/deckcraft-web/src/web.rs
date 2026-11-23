@@ -1,7 +1,7 @@
 //! The browser shell: web `Services`, drag-and-drop, and the eframe web runner.
 
 use deckcraft_engine::Session;
-use deckcraft_ui_egui::{Inbox, InboxEvent, InboxFile, Services, SlideApp};
+use deckcraft_ui_egui::{Inbox, InboxEvent, InboxFile, Services, SlideApp, download_mime, download_name};
 use wasm_bindgen::JsCast as _;
 
 const PRESENTATION_EXTS: &[&str] = &["deckcraft", "pptx", "potx", "ppsx", "ppt", "pot", "pps", "txt", "md"];
@@ -208,16 +208,13 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
             });
         })),
         write: Some(Box::new(|path: &str, bytes: &[u8]| {
-            let name = file_name(path);
-            let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
-            craft_web_host::web::download(&name, craft_share::export::mime_for_ext(ext), bytes)
+            let name = download_name(path);
+            craft_web_host::web::download(&name, download_mime(&name), bytes)
         })),
         // Every Save As / Export copy, framed by a page that keeps the files or not: a download,
-        // never a message to the page.
+        // never a message to the page. A failure is shown in the status bar.
         download: Some(Box::new(|name: &str, mime: &str, bytes: &[u8]| {
-            if let Err(e) = craft_web_host::web::download(&file_name(name), mime, bytes) {
-                log::error!("download of {name} failed: {e}");
-            }
+            craft_web_host::web::download(&download_name(name), mime, bytes).inspect_err(|e| log::error!("download of {name} failed: {e}"))
         })),
         inbox: Some(inbox),
         ..Default::default()
@@ -226,9 +223,4 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
 
 fn push_inbox(inbox: &Inbox, event: InboxEvent) {
     inbox.lock().unwrap_or_else(|e| e.into_inner()).push(event);
-}
-
-/// The last component of `path`: the name a download gets.
-fn file_name(path: &str) -> String {
-    std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "deckcraft".into())
 }

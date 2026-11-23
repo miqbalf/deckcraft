@@ -88,29 +88,28 @@ Messages are plain objects with a `type`:
 |---|---|---|
 | `deckcraft:ready` | to the page | `version`, `appVersion`. The app runs and listens: send the file now. |
 | `deckcraft:open` | from the page | `name` (a bare file name, such as `Talk.pptx`), `bytes` (`ArrayBuffer` or `Uint8Array`). Opens like File › Open: a presentation (.pptx, .potx, .ppsx, .deckcraft) has that name as its file; an outline (.txt, .md, .rtf), a file sent without a name and a damaged file open untitled. |
-| `deckcraft:save` | to the page | `name`, `saveAs`, `bytes` (a transferred `ArrayBuffer`), for every file DeckCraft would otherwise download. The page stores it. |
+| `deckcraft:save` | to the page | `name`, `saveAs`, `bytes` (a transferred `ArrayBuffer`), for Save only. The page stores it. Save As, exports and Print never send it: they download to the user's computer. |
 | `deckcraft:dirty` | to the page | `dirty`, whenever unsaved changes appear or go away. |
 | `deckcraft:failed` | to the page | `error`, when the app couldn't start (no WebGPU or WebGL2) or refused a file of 2 GiB or larger. |
 
-`saveAs` says whether the file becomes the presentation's file, as on the desktop:
+`saveAs` says whether the file is a new one, as on the desktop:
 
 - **Save** sends the file the page sent, under its own name and format (`Talk.pptx` comes back
   as `Talk.pptx`), with `saveAs: false`. DeckCraft keeps only the part after the last `/`, so
   `docs/Talk.pptx` also comes back as `Talk.pptx`. A presentation that has no file the page sent
   (a new one, an outline, a file sent without a name, a file the user dropped, a repaired copy of
-  a damaged file) is a new file with `saveAs: true`: Ctrl+S names it `<title>.deckcraft` as Save
-  suggests on the desktop, and File › Save opens the Save As page first, as on the desktop.
-- **Save As** (.pptx or .deckcraft) sends `saveAs: true`. The presentation is now that file; the
-  next Save sends its name with `saveAs: false`.
-- **Exports and Print** (PDF, handouts, pictures, outline, GIF) send `saveAs: false` and are
-  copies: the presentation keeps its file and its unsaved changes.
+  a damaged file) is a new file with `saveAs: true`, named `<title>.deckcraft` as Save suggests on
+  the desktop (Ctrl+S and File › Save alike). The presentation is then that file; the next Save
+  sends its name with `saveAs: false`.
+- **Save As, exports and Print** (every format of File › Save As and File › Export: .pptx,
+  .deckcraft, .potx, .ppsx, PDF, handouts, pictures, outline, RTF, GIF) are copies. They download
+  to the user's computer and are never posted to the page, so they never create or replace a file
+  there; the presentation keeps its file and its unsaved changes.
 
-`saveAs: false` doesn't mean "safe to overwrite": an export is `false` under a name the page may
-already hold (`Talk.pdf`, or `Talk.pptx` exported from a presentation that is now
-`Talk.deckcraft`). Replace a file without asking only when the name is the one the page sent, or
-the name of the last `saveAs: true` file it stored for this presentation; ask for anything else.
-DeckCraft doesn't learn the name the page finally stores a Save As under, so a page that renames
-on a conflict should map later Saves of the old name itself.
+Replace a file without asking only when the name is the one the page sent, or the name of the
+last `saveAs: true` file it stored for this presentation; ask for anything else. A page that
+renames a `saveAs: true` file on a conflict answers with the name it used (`deckcraft:saved
+{id, name}` when it said `saves: true`), and later Saves use that name.
 
 In host mode DeckCraft starts with an empty presentation instead of the sample, and the first
 presentation the page sends takes its place unless the user has changed it; later ones open
@@ -127,8 +126,8 @@ beside it. The page guards leaving itself (DeckCraft adds no guard of its own), 
       const bytes = await (await fetch("/files/Talk.pptx")).arrayBuffer();
       frame.contentWindow.postMessage({ type: "deckcraft:open", name: "Talk.pptx", bytes }, location.origin, [bytes]);
     } else if (e.data.type === "deckcraft:save") {
-      // Store e.data.bytes as e.data.name. Replace silently only when !e.data.saveAs and the name
-      // is the one sent (or the last saveAs file stored); ask before replacing anything else.
+      // A Save: store e.data.bytes as e.data.name. Replace silently only when !e.data.saveAs and
+      // the name is the one sent (or the last saveAs file stored); ask before replacing anything else.
     }
   });
 </script>

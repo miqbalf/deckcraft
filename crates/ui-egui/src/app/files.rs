@@ -183,10 +183,13 @@ impl SlideApp {
     /// bar) when there are no bytes or no way to download.
     pub(super) fn download(&mut self, name: &str, mime: &str, bytes: deckcraft_engine::Result<Vec<u8>>) -> bool {
         match (bytes, self.services.download.as_mut()) {
-            (Ok(b), Some(dl)) => {
-                dl(name, mime, &b);
-                true
-            }
+            (Ok(b), Some(dl)) => match dl(name, mime, &b) {
+                Ok(()) => true,
+                Err(e) => {
+                    self.set_status(format!("Couldn't download {name}: {e}"));
+                    false
+                }
+            },
             (Err(e), _) => {
                 self.set_status(e.to_string());
                 false
@@ -416,7 +419,11 @@ impl SlideApp {
             && let Some(d) = self.session.active()
         {
             match deckcraft_engine::cmd::file::save_bytes(&d.doc, "deckcraft") {
-                Ok(bytes) => dl(&suggested, "application/zip", &bytes),
+                Ok(bytes) => {
+                    if let Err(e) = dl(&suggested, crate::download_mime(&suggested), &bytes) {
+                        self.set_status(format!("Couldn't download {suggested}: {e}"));
+                    }
+                }
                 Err(e) => self.set_status(e.to_string()),
             }
         }

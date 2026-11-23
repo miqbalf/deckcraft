@@ -61,7 +61,13 @@ fn web_export_all_slides_gives_one_file_per_slide() {
     assert_eq!(web_image_files(&doc, 1, false, "png", false).len(), 1);
     let names = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
     let log = names.clone();
-    let services = Services { download: Some(Box::new(move |n: &str, _: &str, _: &[u8]| log.borrow_mut().push(n.into()))), ..Default::default() };
+    let services = Services {
+        download: Some(Box::new(move |n: &str, _: &str, _: &[u8]| {
+            log.borrow_mut().push(n.into());
+            Ok(())
+        })),
+        ..Default::default()
+    };
     let mut app = SlideApp::new(Session::with_new(), services);
     app.session.active_mut().unwrap().path = Some("Deck.pptx".into());
     app.session.execute("slide.new", &json!({})).unwrap();
@@ -80,7 +86,10 @@ fn web_png_export_can_leave_the_background_transparent() {
     let got: Rc<RefCell<Vec<(String, Vec<u8>)>>> = Rc::default();
     let log = got.clone();
     let services = Services {
-        download: Some(Box::new(move |name: &str, _: &str, b: &[u8]| log.borrow_mut().push((name.to_string(), b.to_vec())))),
+        download: Some(Box::new(move |name: &str, _: &str, b: &[u8]| {
+            log.borrow_mut().push((name.to_string(), b.to_vec()));
+            Ok(())
+        })),
         ..Default::default()
     };
     let mut app = SlideApp::new(Session::with_new(), services);
@@ -103,8 +112,13 @@ fn every_listed_save_type_exports() {
     use std::rc::Rc;
     let got: Rc<RefCell<Vec<String>>> = Rc::default();
     let log = got.clone();
-    let services =
-        Services { download: Some(Box::new(move |name: &str, _: &str, _: &[u8]| log.borrow_mut().push(name.to_string()))), ..Default::default() };
+    let services = Services {
+        download: Some(Box::new(move |name: &str, _: &str, _: &[u8]| {
+            log.borrow_mut().push(name.to_string());
+            Ok(())
+        })),
+        ..Default::default()
+    };
     let mut app = SlideApp::new(Session::with_new(), services);
     app.session.execute("slide.new", &json!({})).unwrap();
     for f in crate::SAVE_AS.formats() {
