@@ -506,11 +506,31 @@ fn repair_fixes_missing_layout_and_size() {
 /// (the engine refuses edits to such a deck) instead of a duplicated fresh id (#407).
 #[test]
 fn repair_keeps_a_duplicate_it_cannot_reid() {
-    let mut p = Presentation { next_id: u32::MAX, ..Default::default() };
+    // Ids at or above LIVE_ID_BASE are live peers' and not this deck's counter (L3 ruling), so
+    // the deck's ids are used up when one sits just below the live range.
+    let mut p = Presentation::default();
+    Arc::make_mut(&mut p.slides[0]).id = deckcraft_model::SlideId(deckcraft_model::LIVE_ID_BASE - 1);
     p.slides.push(p.slides[0].clone());
     repair(&mut p);
     assert_eq!(p.slides.len(), 2, "the duplicate stays visible");
     assert_eq!(p.slides[0].id, p.slides[1].id, "no fresh id was invented");
+}
+
+/// A file whose shape ids reach just below the live range cannot make the loader mint a live id
+/// for a duplicate shape (L3 review Minor 7): the duplicate keeps its id, as with used-up ids.
+#[test]
+fn repair_never_reids_a_shape_into_the_live_range() {
+    let mut p = Presentation::default();
+    let mut sh = deckcraft_model::Shape { id: deckcraft_model::ShapeId(deckcraft_model::LIVE_ID_BASE - 1), ..Default::default() };
+    sh.name = "top".into();
+    let s = Arc::make_mut(&mut p.slides[0]);
+    s.shapes.push(sh.clone());
+    s.shapes.push(sh);
+    repair(&mut p);
+    let mut ids = Vec::new();
+    deckcraft_model::walk(&p.slides[0].shapes, &mut |sh, _| ids.push(sh.id.0));
+    assert!(ids.iter().all(|id| *id < deckcraft_model::LIVE_ID_BASE), "no id in the live range: {ids:x?}");
+    assert!(p.next_id < deckcraft_model::LIVE_ID_BASE);
 }
 
 #[test]

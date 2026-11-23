@@ -155,7 +155,7 @@ pub fn repair(p: &mut Presentation) {
 /// Give a shape that repeats an id already used on its slide, layout or master (groups included)
 /// a fresh one, so edits, selection and the Selection Pane find one shape per id. The first keeps
 /// its id, and with it what animations and connectors point at. An exhausted id space leaves the
-/// rest as they are (#407).
+/// rest as they are (#407), and so does a counter that reached the live range.
 fn reid_duplicate_shapes(p: &mut Presentation) {
     fn has_duplicates(shapes: &[deckcraft_model::Shape]) -> bool {
         let mut seen = std::collections::HashSet::new();
@@ -168,8 +168,10 @@ fn reid_duplicate_shapes(p: &mut Presentation) {
             return;
         }
         for sh in shapes {
+            // Like `Presentation::alloc_id` without a block: a fresh id stays below
+            // LIVE_ID_BASE, so a file can never make the loader mint into a live peer's range.
             if !seen.insert(sh.id)
-                && let Some(id) = (*next).max(1).checked_add(1)
+                && let Some(id) = (*next).max(1).checked_add(1).filter(|n| *n < deckcraft_model::LIVE_ID_BASE)
             {
                 *next = id;
                 sh.id = deckcraft_model::ShapeId(id);
