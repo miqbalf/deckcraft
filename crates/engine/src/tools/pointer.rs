@@ -228,6 +228,19 @@ impl Session {
         true
     }
 
+    /// End the interaction a command opened (a trackpad twist, `shape.rotate` with
+    /// `gesture: move`) whose end did not come: no pointer drag holds it. It becomes its own undo
+    /// step and report, so the command about to run is neither folded into it nor kept from
+    /// its own report.
+    ///
+    /// Only the twist's own interaction ("Rotation") is settled: a pointer gesture runs commands
+    /// of its own (the drop of an Alt-drag duplicates) inside its interaction.
+    pub(crate) fn settle_command_interaction(&mut self) {
+        if !self.tool.dragging() {
+            self.commit_named(super::TWIST);
+        }
+    }
+
     /// End the interaction only when it is the one `label` started. A twist must not commit a drag.
     pub(crate) fn commit_named(&mut self, label: &str) {
         let ours = self.active().and_then(|st| st.interaction.as_ref()).is_some_and(|i| i.label == label);

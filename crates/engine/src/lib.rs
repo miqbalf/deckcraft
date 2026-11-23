@@ -660,6 +660,11 @@ impl Session {
         if self.depth == 0 && (spec.journal || spec.undoable) && !matches!(id, "text.compose" | "text.commit") {
             self.settle_composition();
         }
+        // Likewise a twist whose `gesture: end` never came: only its own steps continue it.
+        let twist = id == "shape.rotate" && matches!(params.get("gesture").and_then(Value::as_str), Some("move" | "end"));
+        if self.depth == 0 && (spec.journal || spec.undoable) && !twist {
+            self.settle_command_interaction();
+        }
         if let Err(e) = (spec.enabled)(self) {
             // A command told which shapes to act on doesn't depend on what is selected.
             let named = (e == cmd::NOTHING_SELECTED || e == cmd::SELECT_TWO || e == cmd::merge::IN_GROUP)

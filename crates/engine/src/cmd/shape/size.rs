@@ -172,11 +172,11 @@ pub(super) fn rotate(s: &mut Session, p: &Value) -> Result<Value> {
     // A trackpad twist sends many small steps. `gesture: move` keeps them as one undo;
     // `gesture: end` commits that step and does not rotate again.
     if p.get("gesture").and_then(Value::as_str) == Some("end") {
-        s.commit_named("Rotation");
+        s.commit_named(crate::tools::TWIST);
         return Ok(json!({}));
     }
     if p.get("gesture").and_then(Value::as_str) == Some("move") {
-        s.begin("Rotation");
+        s.begin(crate::tools::TWIST);
     }
     let (abs, by) = (f64_param(p, "deg"), f64_param(p, "by"));
     edit_geometry(s, p, "shape.rotate", |sh| {

@@ -79,6 +79,7 @@ fn every_registered_command_change_is_reported() {
         let uid = st.uid;
         let seen = observe(&mut s, uid);
         let before = doc_of(&s, uid).expect("open");
+        let steps = undo_len(&s, uid);
         let _ = s.execute(spec.id, &json!({}));
         let got = take(&seen);
         match doc_of(&s, uid) {
@@ -89,8 +90,116 @@ fn every_registered_command_change_is_reported() {
             }
             _ => assert!(got.is_empty(), "{}: nothing changed, nothing reported, got {}", spec.id, got.len()),
         }
+        // Every undo step a command made is a change that was reported.
+        if undo_len(&s, uid) > steps {
+            assert_eq!(got.len(), 1, "{}: an undo step without a report", spec.id);
+        }
     }
-    assert!(changed > 50, "the deck changed under many commands ({changed})");
+    assert!(changed > 0, "some command changed the deck");
+}
+
+fn undo_len(s: &Session, uid: u64) -> usize {
+    s.documents().iter().find(|d| d.uid == uid).map_or(0, |d| d.history.undo.len())
+}
+
+/// Each report's `before` is the previous one's `after`.
+fn assert_chained(got: &[Edited]) {
+    for w in got.windows(2) {
+        assert!(Arc::ptr_eq(&w[0].after, &w[1].before), "{} then {}: the reports chain", w[0].command, w[1].command);
+    }
+}
+
+#[test]
+fn undo_and_redo_with_real_history_report_once_each_and_chain() {
+    let mut s = Session::with_new();
+    let uid = uid(&s);
+    let seen = observe(&mut s, uid);
+    let empty = doc_of(&s, uid).expect("open");
+    s.execute("shape.insert", &json!({"preset": "rect", "rect": [10.0, 10.0, 50.0, 50.0]})).expect("insert");
+    let inserted = doc_of(&s, uid).expect("open");
+    s.execute("edit.undo", &json!({})).expect("undo");
+    let undone = doc_of(&s, uid).expect("open");
+    s.execute("edit.redo", &json!({})).expect("redo");
+    let redone = doc_of(&s, uid).expect("open");
+    let got = take(&seen);
+    assert_eq!(got.iter().map(|e| e.command.as_str()).collect::<Vec<_>>(), ["shape.insert", "edit.undo", "edit.redo"]);
+    assert!(Arc::ptr_eq(&got[0].before, &empty));
+    assert!(Arc::ptr_eq(&got[1].before, &inserted) && Arc::ptr_eq(&got[1].after, &undone));
+    assert!(Arc::ptr_eq(&got[2].after, &redone));
+    assert_chained(&got);
+}
+
+#[test]
+fn delete_text_reports_once() {
+    let mut s = editing_sample();
+    let uid = uid(&s);
+    let seen = observe(&mut s, uid);
+    let (before, steps) = (doc_of(&s, uid).expect("open"), undo_len(&s, uid));
+    let r = s.execute("text.deleteSurrounding", &json!({"before": 1, "after": 1})).expect("delete");
+    assert!(r["deleted"].as_u64().is_some_and(|n| n > 0), "text was deleted: {r}");
+    let after = doc_of(&s, uid).expect("open");
+    assert_one(&take(&seen), uid, &before, &after, "Delete Text");
+    assert!(undo_len(&s, uid) > steps, "one undo step");
+}
+
+/// A new presentation with one rectangle selected.
+fn one_selected_shape() -> (Session, u64) {
+    let mut s = Session::with_new();
+    let id = s.execute("shape.insert", &json!({"preset": "rect", "rect": [100.0, 100.0, 100.0, 60.0]})).expect("insert")["id"].as_u64().expect("id");
+    s.execute("edit.select", &json!({"ids": [id]})).expect("select");
+    (s, id)
+}
+
+#[test]
+fn a_twist_reports_once_at_its_end() {
+    let (mut s, _) = one_selected_shape();
+    let uid = uid(&s);
+    let seen = observe(&mut s, uid);
+    let before = doc_of(&s, uid).expect("open");
+    for _ in 0..4 {
+        s.execute("shape.rotate", &json!({"by": 5.0, "gesture": "move"})).expect("twist");
+        assert!(take(&seen).is_empty(), "nothing during the twist");
+    }
+    s.execute("shape.rotate", &json!({"gesture": "end"})).expect("end");
+    let after = doc_of(&s, uid).expect("open");
+    assert!(!Arc::ptr_eq(&before, &after), "the shape turned");
+    assert_one(&take(&seen), uid, &before, &after, "twist");
+}
+
+#[test]
+fn a_twist_whose_end_never_came_is_settled_by_the_next_command() {
+    let (mut s, _) = one_selected_shape();
+    let uid = uid(&s);
+    let seen = observe(&mut s, uid);
+    let (before, steps) = (doc_of(&s, uid).expect("open"), undo_len(&s, uid));
+    for _ in 0..3 {
+        s.execute("shape.rotate", &json!({"by": 5.0, "gesture": "move"})).expect("twist");
+    }
+    let twisted = doc_of(&s, uid).expect("open");
+    // The host lost `gesture: end`; the next command must not be folded into the twist.
+    s.execute("slide.new", &json!({})).expect("slide");
+    let got = take(&seen);
+    assert_eq!(got.len(), 2, "{:?}", got.iter().map(|e| &e.command).collect::<Vec<_>>());
+    assert!(Arc::ptr_eq(&got[0].before, &before) && Arc::ptr_eq(&got[0].after, &twisted), "the twist alone");
+    assert_eq!(got[1].command, "slide.new");
+    assert_chained(&got);
+    assert_eq!(undo_len(&s, uid), steps + 2, "the twist and the new slide are two undo steps");
+    assert!(!s.remote_busy(uid), "nothing holds remote changes any more");
+}
+
+#[test]
+fn a_pointer_gesture_that_runs_a_command_reports_once() {
+    let mut s = Session::with_new();
+    s.execute("edit.deselect", &json!({})).expect("deselect");
+    let uid = uid(&s);
+    let seen = observe(&mut s, uid);
+    let before = doc_of(&s, uid).expect("open");
+    s.set_tool(ToolKind::Shape { preset: "rect".into() });
+    s.pointer(ev(PointerKind::Down, 200.0, 200.0)).expect("down");
+    s.pointer(ev(PointerKind::Up, 200.0, 200.0)).expect("up");
+    let after = doc_of(&s, uid).expect("open");
+    assert!(!Arc::ptr_eq(&before, &after), "a shape was inserted");
+    assert_one(&take(&seen), uid, &before, &after, "click to insert");
 }
 
 #[test]

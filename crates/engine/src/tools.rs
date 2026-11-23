@@ -18,6 +18,10 @@ mod hit;
 mod pointer;
 
 pub(crate) use drag::MAX_GESTURE_POINTS;
+
+/// The undo label of a trackpad twist (`shape.rotate` with `gesture`), the one interaction a
+/// command opens.
+pub(crate) const TWIST: &str = "Rotation";
 pub use hit::{line_xfrm, resize_box, table_rows, text_pos};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
