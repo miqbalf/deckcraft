@@ -116,7 +116,25 @@ impl SlideApp {
                 self.set_status(e.to_string());
             }
         }
+        let refused = self.live_typing_refused();
         for e in events {
+            // Read-only or paused live presentation: typing, pasting and the editing keys are not
+            // taken, and the person is told why (anything else that edits is put back by the
+            // live session's own check).
+            if let Some(why) = refused
+                && matches!(
+                    e,
+                    egui::Event::Text(_)
+                        | egui::Event::Paste(_)
+                        | egui::Event::PasteImage(_)
+                        | egui::Event::Cut
+                        | egui::Event::Ime(egui::ImeEvent::Commit(_))
+                        | egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete | egui::Key::Enter, pressed: true, .. }
+                )
+            {
+                self.set_status(crate::live::tr(why));
+                continue;
+            }
             // An earlier command in this raw batch may have settled the composition. Request the
             // replacement at this ordered boundary, before the current event is considered.
             self.note_settled_composition(ctx);

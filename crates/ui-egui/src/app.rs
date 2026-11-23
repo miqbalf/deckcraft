@@ -40,6 +40,7 @@ impl SlideApp {
     /// synthetic input, and timing fields.
     pub fn new(session: Session, mut services: Services) -> Self {
         let audio_out = services.audio_out.take();
+        let live = services.live.take().map(crate::live::LiveUi::new);
         SlideApp {
             last_fill: serde_json::json!("accent1"),
             last_outline: serde_json::json!("tx1"),
@@ -122,6 +123,8 @@ impl SlideApp {
             ime_settles_seen: 0,
             ime_interrupt_pending: false,
             ime_reset: HashMap::new(),
+            live,
+            last_drag_at: None,
         }
     }
 
@@ -259,6 +262,7 @@ impl SlideApp {
                 self.dialog = Some(dialogs::Dialog::new("quit"));
             }
         }
+        self.pump_live(ctx);
         self.autosave_if_due(ctx);
         self.tick_media_clock(ctx);
         self.note_settled_composition(ctx);
@@ -319,12 +323,14 @@ impl SlideApp {
             return;
         }
         self.sync_backstage();
+        self.end_lost_drag(&ctx);
         self.keyboard(&ctx);
         self.sync_backstage();
         ribbon::title_bar(self, ui);
         if self.backstage.is_none() && self.session.active().is_some() {
             ribbon::show(self, ui);
             status::status_bar(self, ui);
+            crate::live::status_strip(self, ui);
         }
         let now = ui.input(|i| i.time);
         if self.tick_anim_preview(now) {

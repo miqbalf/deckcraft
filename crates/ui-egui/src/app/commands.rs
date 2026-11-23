@@ -18,13 +18,18 @@ impl SlideApp {
     /// Run a command by id (UI commands here, everything else in the engine). Errors show in the
     /// status bar and are returned.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
-        let r = if UI_COMMANDS.iter().any(|c| c.0 == id) {
+        let r = if let Some(why) = self.live_refusal(id) {
+            // The live presentation's gate: refused with the reason, nothing changed.
+            Err(crate::live::tr(why).to_owned())
+        } else if UI_COMMANDS.iter().any(|c| c.0 == id) {
             self.run_ui(id, &params)
         } else if id == "file.save" && self.services.host_save.is_some() && params.get("path").is_none() {
             // A page that keeps the files (`?host=parent`): Save by id (the command palette) goes
             // to the page like Ctrl+S. The engine would write to the presentation's path, which a
             // browser can't.
             self.save_to_host(None).map(|name| json!({"path": name}))
+        } else if let Some(r) = self.run_live(id, &params) {
+            r
         } else {
             self.session.execute(id, &params).map_err(|e| e.to_string())
         };

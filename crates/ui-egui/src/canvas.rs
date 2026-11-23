@@ -342,6 +342,7 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     pointer(app, ui, &resp, xf);
     if !app.anim_preview_active() {
         overlays(app, ui, &painter, xf, &t);
+        crate::live::canvas_marks(app, ui, &painter, xf);
         ime_output(app, ui, xf);
         media_bar(app, ui, xf);
         gif_buttons(app, ui, xf, &gifs);

@@ -152,4 +152,7 @@ pub struct Services {
     pub audio_out: Option<Box<dyn deckcraft_media::AudioOut>>,
     /// How many displays are connected, when the host can tell: Presenter View needs a second.
     pub displays: Option<Box<dyn FnMut() -> Option<usize>>>,
+    /// A presentation the host opened live ([`deckcraft_live::DeckLive::start`] on this window's
+    /// session). The window takes it at its next frame, so a host may also set it later.
+    pub live: Option<crate::live::LiveDeck>,
 }

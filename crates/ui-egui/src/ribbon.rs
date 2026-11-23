@@ -71,6 +71,12 @@ pub fn known(id: &str) -> bool {
 }
 
 pub fn enabled(app: &SlideApp, id: &str) -> bool {
+    // The live presentation's gate first: the widget drawn next shows why (`live::gate_hint`).
+    let why = app.live_refusal(id);
+    crate::live::note_gate(why);
+    if why.is_some() {
+        return false;
+    }
     match deckcraft_engine::find_command(id) {
         Some(c) => (c.enabled)(&app.session).is_ok(),
         None => crate::UI_COMMANDS.iter().any(|c| c.0 == id),

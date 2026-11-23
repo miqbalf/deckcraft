@@ -110,6 +110,9 @@ pub(super) fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf
     let pressure = reported_pressure(ui);
     let ev = |kind| PointerEvent { kind, x: p.x, y: p.y, mods: m, tol, pressure };
     let primary = ui.input(|i| i.pointer.primary_pressed());
+    if app.session.tool.dragging() || primary {
+        app.last_drag_at = Some(p);
+    }
     if resp.hovered() && !app.session.tool.dragging() {
         let _ = app.session.pointer(ev(PointerKind::Move));
     }

@@ -57,6 +57,7 @@ pub fn big_button_ex(ui: &mut Ui, icon: Icon, label: &str, enabled: bool, split:
     // The whole button runs the main command; the narrow strip at the end of the label row is the
     // dropdown. A split button therefore has two named targets, not a third unnamed row target.
     let (rect, resp) = ui.allocate_exact_size(vec2(w, RIBBON_H - 2.0), if enabled { Sense::click() } else { Sense::hover() });
+    let resp = crate::live::gate_hint(resp, enabled);
     // Named for screen readers and UI tests ("Ink to\nShape" reads "Ink to Shape").
     let spoken = label.replace('\n', " ");
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &spoken));
@@ -155,6 +156,7 @@ pub fn small_button_named(
     let w = 24.0 + tw + arrow_w;
     // As in `big_button_ex`, a split row is two targets and must not add a third named node.
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 22.0), if enabled && !split { Sense::click() } else { Sense::hover() });
+    let resp = crate::live::gate_hint(resp, enabled);
     if !name.is_empty() && !split {
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, name));
     }
@@ -248,6 +250,7 @@ pub fn check_item(ui: &mut Ui, label: &str, enabled: bool, on: bool) -> Response
     let font = theme::font(12.0);
     let tw = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font.clone(), t.text).size().x) + 5.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(24.0 + tw, 22.0), if enabled { Sense::click() } else { Sense::hover() });
+    let resp = crate::live::gate_hint(resp, enabled);
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, label));
     let painter = ui.painter_at(rect);
     if let Some(c) = bg(ui, &resp, false, &t) {
@@ -264,6 +267,7 @@ pub fn check_item(ui: &mut Ui, label: &str, enabled: bool, on: bool) -> Response
 pub fn icon_toggle(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool, on: bool) -> Response {
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), if enabled { Sense::click() } else { Sense::hover() });
+    let resp = crate::live::gate_hint(resp, enabled);
     let painter = ui.painter_at(rect);
     if let Some(c) = bg(ui, &resp, on, &t) {
         painter.rect_filled(rect, CornerRadius::same(4), c);
@@ -278,6 +282,7 @@ pub fn icon_toggle(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool, on: bool) 
 pub fn color_split(ui: &mut Ui, icon: Icon, tip: &str, color: Color32, enabled: bool) -> (Response, Response) {
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 22.0), Sense::hover());
+    let resp = crate::live::gate_hint(resp, enabled);
     let main = ui.interact(Rect::from_min_size(rect.min, vec2(23.0, 22.0)), resp.id.with("m"), if enabled { Sense::click() } else { Sense::hover() });
     main.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, tip));
     let arrow = ui.interact(
@@ -335,6 +340,7 @@ pub fn rows<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 pub fn dropdown(ui: &mut Ui, label: &str, current: &str, width: f32, enabled: bool, add_items: impl FnOnce(&mut Ui)) -> Response {
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 22.0), if enabled { Sense::click() } else { Sense::hover() });
+    let resp = crate::live::gate_hint(resp, enabled);
     let painter = ui.painter_at(rect);
     painter.rect(
         rect,

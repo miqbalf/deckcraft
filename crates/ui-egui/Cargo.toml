@@ -18,6 +18,10 @@ deckcraft-render = { workspace = true }
 deckcraft-anim = { workspace = true }
 deckcraft-engine = { workspace = true }
 deckcraft-media = { workspace = true }
+deckcraft-live = { workspace = true }
+# From miqbalf/collab-craft, departing from AGENTS.md rule 10 by owner decision (as for WordCraft).
+craft-collab = { workspace = true }
+craft-live = { workspace = true }
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 egui_extras = { workspace = true }
 craft-ui = { workspace = true }
@@ -31,6 +35,9 @@ craft-update = { workspace = true }
 
 [dev-dependencies]
 skrifa = { workspace = true }
+# An in-memory relay, so the live tests join a real room with no server.
+deckcraft-live = { workspace = true, features = ["test-util"] }
+craft-live = { workspace = true, features = ["test-util"] }
 # kittest's own dev-dependencies do not propagate; tests need both font features explicitly.
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }

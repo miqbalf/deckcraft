@@ -244,6 +244,7 @@ fn list(app: &mut SlideApp, ui: &mut Ui) {
                 egui::StrokeKind::Outside,
             );
         }
+        crate::live::slide_dots(app, ui, i, img);
         if resp.clicked() {
             let (shift, cmd) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
             if let Some(id) = id {

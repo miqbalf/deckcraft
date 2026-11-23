@@ -23,6 +23,7 @@ pub mod dialogs;
 pub mod doc_window;
 pub mod eyedropper;
 pub mod icons;
+pub mod live;
 pub mod media;
 pub mod menus;
 pub mod opening;
@@ -373,6 +374,12 @@ pub struct SlideApp {
     /// keyed by viewport so a request or completion stamped for another viewport is never bound;
     /// render-only child viewports are rejected before they can create or overwrite an entry.
     ime_reset: HashMap<egui::ViewportId, ImeResetPhase>,
+    /// The presentation edited live with other people, while it is open ([`live::LiveUi`]).
+    pub live: Option<live::LiveUi>,
+    /// Where the last pointer press or drag on the canvas was, in slide points: a drag whose
+    /// release never arrives (the window lost focus, the browser cancelled the pointer) is
+    /// ended there.
+    pub(crate) last_drag_at: Option<deckcraft_geom::Point>,
 }
 
 /// The platform's in-progress IME composition, as far as this editor tracks it.
@@ -497,6 +504,9 @@ mod inbox_tests;
 
 #[cfg(test)]
 mod host_save_tests;
+
+#[cfg(test)]
+mod live_tests;
 
 #[cfg(test)]
 mod tests;

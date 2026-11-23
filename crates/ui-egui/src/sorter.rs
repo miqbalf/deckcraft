@@ -232,6 +232,7 @@ fn place_slides(app: &mut SlideApp, ui: &mut Ui, g: &Grid<'_>, budget: &mut u32,
                 if let Some(tr) = g.doc.slides.get(i).and_then(|s| s.transition.as_ref()).filter(|tr| tr.kind != "none") {
                     p.text(pos2(img.max.x, img.max.y + 12.0), Align2::RIGHT_CENTER, format!("★ {}", tr.kind), theme::font(10.5), t.text_faint);
                 }
+                crate::live::slide_dots(app, ui, i, img);
                 if resp.clicked() {
                     let (shift, add) = ui.input(|inp| (inp.modifiers.shift, inp.modifiers.command));
                     if shift {
