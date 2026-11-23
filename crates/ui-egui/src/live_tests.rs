@@ -495,6 +495,37 @@ fn closing_hands_the_unmerged_copy_over() {
     assert!(back.slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text().contains("offline"), "with Ann's offline text");
 }
 
+/// The page ends the session (a `live` for another room, or less access) while Ann types offline:
+/// her edits come to the page as the copy, and the page is told unsaved work waits until then
+/// (Review C1, I2).
+#[test]
+fn a_host_end_while_offline_hands_the_copy_over() {
+    let (copies, downloads) = (HostLog::default(), HostLog::default());
+    let (services, saves) = answering(&copies, &downloads);
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, services);
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.relay.drop_link(&room.ann_hub);
+    room.settle();
+    let app = room.h.state_mut();
+    app.run("slide.go", json!({"index": 1})).unwrap();
+    app.run("text.edit", json!({"id": alpha.0})).unwrap();
+    app.run("text.insert", json!({"text": "offline"})).unwrap();
+    room.h.run_steps(1);
+    assert!(room.h.state().live_unconfirmed(), "the room has not confirmed the offline text");
+    room.h.state_mut().end_live_for("The live session was restarted. Reopen the file.");
+    room.h.run_steps(2);
+    room.h.state_mut().hand_over_copies();
+    let got = copies.got();
+    assert_eq!(got.len(), 1, "one copy handed over");
+    let back = deckcraft_engine::cmd::file::open_presentation(&got[0].0, &got[0].1).unwrap();
+    assert!(back.slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text().contains("offline"), "with Ann's offline text");
+    assert!(room.h.state().copies_unsaved(), "unsaved until the page answers");
+    let id = sent_id(&room);
+    saves.answer(crate::HostAnswer::Saved { id, name: None });
+    room.h.run_steps(1);
+    assert!(!room.h.state().copies_unsaved(), "stored");
+}
+
 /// Quitting the window ends the live session first; a copy that could not be saved stays offered.
 #[test]
 fn ending_the_live_session_keeps_unsent_edits() {
@@ -788,25 +819,111 @@ fn a_failed_write_keeps_the_copy() {
 fn the_copy_goes_to_the_page_as_a_new_file() {
     let downloads = HostLog::default();
     let copies = HostLog::default();
-    let refuse = std::rc::Rc::new(std::cell::Cell::new(true));
     let mut services = downloading(&downloads);
-    let (c, r) = (copies.clone(), refuse.clone());
+    let c = copies.clone();
     services.save_copy = Some(Box::new(move |name: &str, b: &[u8]| {
-        if r.get() {
-            return Err("the page is gone".to_owned());
-        }
         c.0.borrow_mut().push((name.to_owned(), b.to_vec()));
-        Ok(())
+        Ok(None)
     }));
     let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, services);
     room.h.state_mut().pending_unmerged.push(copy());
-    room.h.state_mut().offer_waiting_copies();
-    assert!(room.h.state().copies_waiting(), "a refused hand-over keeps the copy");
-    refuse.set(false);
-    room.h.state_mut().offer_waiting_copies();
+    room.h.state_mut().hand_over_copies();
     assert_eq!(copies.got(), vec![copy()], "the page got the copy");
     assert!(downloads.got().is_empty(), "not as a download");
-    assert!(!room.h.state().copies_waiting(), "nothing waits");
+    assert!(!room.h.state().copies_unsaved(), "a page that does not answer saves stored it");
+}
+
+/// A web host that keeps the files and answers saves.
+fn answering(copies: &HostLog, downloads: &HostLog) -> (Services, crate::HostSaves) {
+    let saves = crate::HostSaves::default();
+    saves.set_confirms();
+    let (c, s) = (copies.clone(), saves.clone());
+    let d = downloads.clone();
+    let services = Services {
+        host_saves: saves.clone(),
+        save_copy: Some(Box::new(move |name: &str, b: &[u8]| {
+            c.0.borrow_mut().push((name.to_owned(), b.to_vec()));
+            Ok(s.copy_id())
+        })),
+        download_copy: Some(Box::new(move |name: &str, b: &[u8]| d.0.borrow_mut().push((name.to_owned(), b.to_vec())))),
+        ..Default::default()
+    };
+    (services, saves)
+}
+
+fn sent_id(room: &Room) -> String {
+    room.h.state().copies_sent.first().map(|(id, _)| id.clone()).expect("a copy was handed to the page")
+}
+
+/// The copy is kept until the page says it stored it; then the person is told the new file's
+/// name (Review I1).
+#[test]
+fn a_copy_the_page_saved_is_named_to_the_person() {
+    let (copies, downloads) = (HostLog::default(), HostLog::default());
+    let (services, saves) = answering(&copies, &downloads);
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, services);
+    room.h.state_mut().pending_unmerged.push(copy());
+    room.h.state_mut().hand_over_copies();
+    assert_eq!(copies.got(), vec![copy()], "the page got the copy");
+    assert!(room.h.state().copies_unsaved(), "kept until the page answers");
+    let id = sent_id(&room);
+    saves.answer(crate::HostAnswer::Saved { id, name: Some("Deck (unmerged 2026-11-23 1404) (2).pptx".into()) });
+    room.h.run_steps(1);
+    assert!(!room.h.state().copies_unsaved(), "nothing waits once stored");
+    let said = room.h.state().toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+    assert_eq!(said, super::live::fill(super::live::COPY_SAVED_TEXT, &[("name", "Deck (unmerged 2026-11-23 1404) (2).pptx")]));
+    assert!(downloads.got().is_empty());
+}
+
+/// A copy the page failed to store is offered again and goes to a browser download, never back
+/// to the page on its own (Review I1, M7).
+#[test]
+fn a_copy_the_page_failed_to_save_is_offered_as_a_download() {
+    let (copies, downloads) = (HostLog::default(), HostLog::default());
+    let (services, saves) = answering(&copies, &downloads);
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, services);
+    room.h.state_mut().pending_unmerged.push(copy());
+    room.h.state_mut().hand_over_copies();
+    let id = sent_id(&room);
+    saves.answer(crate::HostAnswer::Failed { id, error: "quota".into() });
+    room.h.run_steps(1);
+    assert_eq!(room.h.state().pending_unmerged, vec![copy()], "the copy waits again");
+    let said = room.h.state().toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+    assert_eq!(said, super::live::fill(super::live::COPY_FAILED_TEXT, &[("error", "quota")]));
+    for _ in 0..3 {
+        room.h.state_mut().hand_over_copies();
+        room.h.run_steps(1);
+    }
+    assert_eq!(copies.got().len(), 1, "no automatic second hand-over");
+    room.h.get_by_role_and_label(Role::Button, super::live::SAVE_COPY_TEXT).click();
+    room.h.run_steps(2);
+    assert_eq!(downloads.got(), vec![copy()], "Save a copy downloads it");
+    assert!(!room.h.state().copies_unsaved());
+}
+
+/// A hand-over the page could not take keeps the copy and is not retried every frame.
+#[test]
+fn a_hand_over_that_could_not_be_posted_is_not_retried() {
+    let (downloads, tries) = (HostLog::default(), HostLog::default());
+    let t = tries.clone();
+    let d = downloads.clone();
+    let services = Services {
+        save_copy: Some(Box::new(move |name: &str, b: &[u8]| {
+            t.0.borrow_mut().push((name.to_owned(), b.to_vec()));
+            Err("the page is gone".to_owned())
+        })),
+        download_copy: Some(Box::new(move |name: &str, b: &[u8]| d.0.borrow_mut().push((name.to_owned(), b.to_vec())))),
+        ..Default::default()
+    };
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, services);
+    room.h.state_mut().pending_unmerged.push(copy());
+    for _ in 0..3 {
+        room.h.state_mut().hand_over_copies();
+    }
+    assert_eq!(tries.got().len(), 1, "tried once");
+    assert!(room.h.state().copies_waiting(), "a refused hand-over keeps the copy");
+    room.h.state_mut().offer_unmerged();
+    assert_eq!(downloads.got(), vec![copy()], "Save a copy downloads it");
 }
 
 /// With the live presentation closed and no other open, a waiting copy is still offered on the
@@ -912,6 +1029,63 @@ fn slide_delete_key_and_slide_paste_are_gated_with_sections() {
     assert_eq!(crate::ribbon::gate(room.ann(), "edit.paste").why, Some(SECTIONS_TEXT), "with the reason");
 }
 
+fn press(room: &mut Room, key: egui::Key) {
+    room.h.input_mut().events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    room.h.run_steps(2);
+}
+
+/// Enter on the slide with nothing selected adds a slide in the engine, with no shortcut of its
+/// own: in a deck with sections it is refused up front, as the Delete key is (Review M2).
+#[test]
+fn enter_with_nothing_selected_adds_no_slide_with_sections() {
+    let mut room = Room::editors(&deck(true));
+    room.h.run_steps(1);
+    {
+        let st = room.h.state_mut().session.active_mut().unwrap();
+        st.selection.shapes.clear();
+        st.selection.text = None;
+    }
+    let slides = room.ann_doc().slides.len();
+    room.h.input_mut().events.push(egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Default::default(),
+    });
+    room.h.step();
+    assert_eq!(room.ann_doc().slides.len(), slides, "Enter added no slide, not even for a frame");
+    room.h.run_steps(1);
+    assert_eq!(room.h.state_mut().fresh_status().as_deref(), Some(SECTIONS_TEXT), "and said why");
+}
+
+/// The keys an editor types with still work live in a deck with sections: Backspace and Tab in
+/// text, Delete on a shape (U2 concern 7).
+#[test]
+fn editing_keys_are_not_refused_live_with_sections() {
+    let mut room = Room::editors(&deck(true));
+    let (alpha, beta) = (find(&room.ann_doc(), "alpha"), find(&room.ann_doc(), "beta"));
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("text.edit", json!({"id": alpha.0})).unwrap();
+    room.h.run_steps(1);
+    press(&mut room, egui::Key::End);
+    press(&mut room, egui::Key::Backspace);
+    press(&mut room, egui::Key::Tab);
+    room.settle();
+    let text = |p: &Presentation| p.slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text();
+    // AutoCorrect capitalises the first letter of the sentence as the text is edited.
+    assert_eq!(text(&room.ann_doc()).to_lowercase(), "alph\t", "Backspace and Tab typed");
+    assert_eq!(text(&room.bob.doc()), text(&room.ann_doc()), "and reached Bob");
+    room.h.state_mut().run("text.exit", json!({})).unwrap();
+    room.h.state_mut().run("edit.select", json!({"ids": [beta.0]})).unwrap();
+    room.h.run_steps(1);
+    press(&mut room, egui::Key::Delete);
+    room.settle();
+    assert!(room.ann_doc().slides[1].shape(beta).is_none(), "Delete removed the shape");
+    assert!(room.bob.doc().slides[1].shape(beta).is_none(), "for Bob too");
+    assert_eq!(room.ann_doc().slides.len(), 3, "and no slide");
+}
+
 /// Clicking the badge of an editor whose place is not known (their slide was deleted, or they
 /// selected nothing yet) says so instead of doing nothing (L7 note).
 #[test]
@@ -927,5 +1101,5 @@ fn following_an_editor_without_a_place_says_so() {
     room.h.get_by_role_and_label(Role::Button, "Bob").click();
     room.h.run_steps(2);
     let said = room.h.state_mut().fresh_status().unwrap_or_default();
-    assert!(said.starts_with("Bob"), "the person is told: {said}");
+    assert_eq!(said, super::live::fill(super::live::NO_PLACE_TEXT, &[("name", "Bob")]), "the person is told");
 }

@@ -29,6 +29,12 @@ impl SlideApp {
     pub(crate) fn poll_host_saves(&mut self) {
         for answer in self.services.host_saves.take_answers() {
             let (HostAnswer::Saved { id, .. } | HostAnswer::Failed { id, .. }) = &answer;
+            if let Some(at) = self.copies_sent.iter().position(|(sent, _)| sent == id) {
+                self.services.host_saves.finish_copy(id);
+                let (_, copy) = self.copies_sent.remove(at);
+                self.copy_answered(copy, answer);
+                continue;
+            }
             if self.services.host_saves.finish_copy(id) {
                 if let HostAnswer::Failed { error, .. } = answer {
                     self.notify(format!("Couldn't save to Nextcloud: {error}"));

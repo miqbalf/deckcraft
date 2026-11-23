@@ -126,6 +126,8 @@ impl SlideApp {
             live,
             pending_unmerged: Vec::new(),
             unmerged_close_offered: false,
+            copies_sent: Vec::new(),
+            page_refused_copy: false,
             last_drag_at: None,
         }
     }

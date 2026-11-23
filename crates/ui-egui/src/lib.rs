@@ -73,7 +73,9 @@ pub use panels::notes;
 pub use panels::selpane;
 pub use panels::thumbs;
 pub use ribbon::qat;
-pub use services::{DownloadFn, HostAnswer, HostSaveFn, HostSaves, Inbox, InboxEvent, InboxFile, OpenAsyncFn, PickFn, ReadFn, Services, WriteFn};
+pub use services::{
+    DownloadFn, HostAnswer, HostSaveFn, HostSaves, Inbox, InboxEvent, InboxFile, OpenAsyncFn, PickFn, ReadFn, SaveCopyFn, Services, WriteFn,
+};
 use state::{FilePlace, FilePurpose, ImeDescriptorKey, ImeDestination, ImeTerminalStamp};
 pub use state::{RECENT_MAX, UiState, ViewMode, ZOOM_RANGE};
 
@@ -381,6 +383,12 @@ pub struct SlideApp {
     pub(crate) pending_unmerged: Vec<(String, Vec<u8>)>,
     /// Closing the window has offered the waiting copies once; a second close goes ahead.
     pub(crate) unmerged_close_offered: bool,
+    /// Copies handed to the page that answers saves, by the id its answer will carry: kept until
+    /// the page says it stored them (U2 review I1).
+    pub(crate) copies_sent: Vec<(String, (String, Vec<u8>))>,
+    /// The page could not take a copy: copies are no longer handed to it on their own, and Save a
+    /// copy downloads them in the browser instead.
+    pub(crate) page_refused_copy: bool,
     /// Where the last pointer press or drag on the canvas was, in slide points: a drag whose
     /// release never arrives (the window lost focus, the browser cancelled the pointer) is
     /// ended there.

@@ -247,11 +247,25 @@ impl SlideApp {
             Some(why) => self.key_refusal(name, mods, why),
             // Editing: a shortcut whose command the gate refuses now (the Delete key on slides in
             // a deck with sections, U1 review M7) is refused up front, with the reason.
-            None => Self::shortcut_spec(name, mods).and_then(|s| self.live_refusal(s.id)),
+            // A context key first: Enter on the slide with nothing selected adds a slide, though
+            // the registry names Enter as Edit Text's shortcut (Review M2).
+            None => match self.context_key_command(name, mods) {
+                Some(id) => self.live_refusal(id),
+                None => Self::shortcut_spec(name, mods).and_then(|s| self.live_refusal(s.id)),
+            },
         };
         let Some(why) = why else { return false };
         self.set_status(crate::live::tr(why));
         true
+    }
+
+    /// The command the engine runs itself for key `name` in this context, whatever the registry
+    /// names as the key's shortcut, when it edits the slide list: Enter with nothing selected adds
+    /// a slide (`Session::key`).
+    fn context_key_command(&self, name: &str, mods: Mods) -> Option<&'static str> {
+        let st = self.session.active()?;
+        let idle = st.selection.text.is_none() && st.selection.shapes.is_empty() && !mods.cmd;
+        (idle && name == "Enter").then_some("slide.new")
     }
 
     /// The registered command whose shortcut key `name` with `mods` is.

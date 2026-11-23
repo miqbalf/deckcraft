@@ -16,6 +16,10 @@ pub type DownloadFn = Box<dyn FnMut(&str, &[u8])>;
 /// ([`HostSaves::confirms`]): it names the save its `saved` or `save-failed` answers.
 pub type HostSaveFn = Box<dyn FnMut(&str, &[u8], bool, Option<&str>) -> Result<(), String>>;
 
+/// [`Services::save_copy`]: `(file name, bytes)`. `Ok(Some(id))` when the page will answer the
+/// save with that id; `Ok(None)` when it does not answer saves (handed over is stored).
+pub type SaveCopyFn = Box<dyn FnMut(&str, &[u8]) -> Result<Option<String>, String>>;
+
 /// What a page that answers saves said about one that carried an id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostAnswer {
@@ -80,7 +84,7 @@ impl HostSaves {
     }
 
     /// Whether `id` named a copy still waiting for its answer (it is not waiting after this).
-    pub(crate) fn finish_copy(&self, id: &str) -> bool {
+    pub fn finish_copy(&self, id: &str) -> bool {
         self.with(|s| match s.copies.iter().position(|c| c == id) {
             Some(at) => {
                 s.copies.remove(at);
@@ -157,6 +161,10 @@ pub struct Services {
     pub live: Option<crate::live::LiveDeck>,
     /// Web, framed by a page that keeps the files: hands a copy of edits the room could not merge
     /// to the page as a new file (`saveAs: true`, Ruling D18), while the presentation's own saves
-    /// are off. Tried before `download` and the Save dialog; an error keeps the copy waiting.
-    pub save_copy: Option<WriteFn>,
+    /// are off. Tried before `download` and the Save dialog; an error keeps the copy waiting. A
+    /// copy the page answers is kept until its `saved` arrives; on `save-failed` it waits again.
+    pub save_copy: Option<SaveCopyFn>,
+    /// A browser download that does not go through the page: where a copy goes once the page
+    /// could not store one.
+    pub download_copy: Option<DownloadFn>,
 }

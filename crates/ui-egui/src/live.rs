@@ -81,6 +81,11 @@ pub const LIVE_ENDED_TEXT: &str = "Live editing has ended in this window.";
 /// Said when a badge is clicked for an editor whose place this window cannot show: `{name}`.
 pub const NO_PLACE_TEXT: &str = "{name}'s place can't be shown yet. It shows again when they select something.";
 
+/// Said when the page stored a copy of unmerged edits: `{name}`.
+pub const COPY_SAVED_TEXT: &str = "Your unmerged changes were saved as {name}.";
+/// Said when the page could not store a copy of unmerged edits: `{error}`.
+pub const COPY_FAILED_TEXT: &str = "Your unmerged changes could not be saved to Nextcloud: {error}. Use Save a copy to download them.";
+
 /// Every English key this module draws, for the translation report.
 pub const ENGLISH_KEYS: &[&str] = &[
     RESTORE_LABEL,
@@ -94,6 +99,8 @@ pub const ENGLISH_KEYS: &[&str] = &[
     LINK_ENDED_TEXT,
     LIVE_ENDED_TEXT,
     NO_PLACE_TEXT,
+    COPY_SAVED_TEXT,
+    COPY_FAILED_TEXT,
 ];
 
 /// The translation lookup for an English key. DeckCraft has no translation catalogue yet, so this
@@ -391,6 +398,56 @@ impl SlideApp {
         !self.pending_unmerged.is_empty()
     }
 
+    /// Whether some unmerged edits are not stored anywhere yet: a copy waits, or the page has not
+    /// confirmed one it was handed.
+    #[must_use]
+    pub fn copies_unsaved(&self) -> bool {
+        !self.pending_unmerged.is_empty() || !self.copies_sent.is_empty()
+    }
+
+    /// A web host that keeps the files calls this every frame: each waiting copy goes to the page
+    /// as soon as it is made (Ruling D18), until the page could not take one; from then on the
+    /// strip's Save a copy downloads them.
+    pub fn hand_over_copies(&mut self) {
+        if !self.page_refused_copy && !self.pending_unmerged.is_empty() {
+            self.offer_waiting_copies();
+        }
+    }
+
+    /// The page answered a copy it was handed: stored (say under which name), or not (it waits
+    /// again, to be downloaded).
+    pub(crate) fn copy_answered(&mut self, copy: (String, Vec<u8>), answer: crate::HostAnswer) {
+        match answer {
+            crate::HostAnswer::Saved { name, .. } => {
+                let name = name.unwrap_or_else(|| copy.0.clone());
+                self.notify(fill(COPY_SAVED_TEXT, &[("name", &name)]));
+            }
+            crate::HostAnswer::Failed { error, .. } => {
+                self.page_refused_copy = true;
+                self.pending_unmerged.push(copy);
+                let text = fill(COPY_FAILED_TEXT, &[("error", &error)]);
+                self.set_status(text.clone());
+                self.notify(text);
+            }
+        }
+    }
+
+    /// The host ended the live session for `reason` (the page reopened the file in another room,
+    /// or the ticket lost edit access). Edits the room never confirmed come back as the copy at
+    /// the next frame ([`DeckLive::end`]).
+    pub fn end_live_for(&mut self, reason: &str) {
+        if let Some(lu) = self.live.as_mut() {
+            lu.live.end(&mut self.session, reason);
+        }
+    }
+
+    /// Whether the live session has edits the room has not confirmed (sent while reconnecting, or
+    /// within one round trip).
+    #[must_use]
+    pub fn live_unconfirmed(&self) -> bool {
+        self.live.as_ref().is_some_and(|lu| lu.live.core().live().unconfirmed_edits() > 0)
+    }
+
     /// The window is about to close: the live session ends, and waiting copies are offered.
     /// When one was not taken, the close is held back once so the strip can keep offering it,
     /// and the person is told that live editing has ended.
@@ -455,14 +512,32 @@ impl SlideApp {
     /// Hands a copy of unmerged edits to the person: a download on the web, a Save dialog on the
     /// desktop. True when the host took it (downloaded, or written).
     pub(crate) fn save_unmerged(&mut self, name: &str, bytes: &[u8]) -> bool {
-        if let Some(save_copy) = self.services.save_copy.as_mut() {
+        if !self.page_refused_copy
+            && let Some(save_copy) = self.services.save_copy.as_mut()
+        {
             return match save_copy(name, bytes) {
-                Ok(()) => true,
+                Ok(Some(id)) => {
+                    // Kept until the page says it stored it.
+                    self.copies_sent.push((id, (name.to_owned(), bytes.to_vec())));
+                    true
+                }
+                Ok(None) => {
+                    self.notify(fill(COPY_SAVED_TEXT, &[("name", name)]));
+                    true
+                }
                 Err(e) => {
+                    // Not handed over: no more automatic hand-overs; the strip offers it.
+                    self.page_refused_copy = true;
                     self.set_status(e);
                     false
                 }
             };
+        }
+        if self.page_refused_copy
+            && let Some(download) = self.services.download_copy.as_mut()
+        {
+            download(name, bytes);
+            return true;
         }
         if let Some(download) = self.services.download.as_mut() {
             download(name, bytes);
@@ -690,7 +765,7 @@ pub(crate) fn status_strip(app: &mut SlideApp, ui: &mut Ui) {
 }
 
 /// Replaces `{key}` placeholders.
-fn fill(key: &str, with: &[(&str, &str)]) -> String {
+pub(crate) fn fill(key: &str, with: &[(&str, &str)]) -> String {
     let mut s = tr(key).to_owned();
     for (k, v) in with {
         s = s.replace(&format!("{{{k}}}"), v);
