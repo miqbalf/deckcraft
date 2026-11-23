@@ -48,18 +48,21 @@ impl Hub for BoxHub {
     fn set_token(&mut self, token: String) {
         self.0.set_token(token);
     }
+    fn set_space(&mut self, space: u32) {
+        self.0.set_space(space);
+    }
 }
 
 /// The live presentation as the window holds it.
 pub type LiveDeck = DeckLive<BoxHub>;
 
-/// The button on a notice about something deleted. L5 adds `deckcraft_live::RESTORE_LABEL`
-/// with the same text; this one goes when that lands.
-pub const RESTORE_LABEL: &str = "Restore";
+pub use deckcraft_live::RESTORE_LABEL;
 /// The live strip's status for a person with a read-only ticket.
 pub const VIEWING_TEXT: &str = "Viewing";
 /// The live strip's status while connected and editing.
 pub const LIVE_TEXT: &str = "Editing live";
+/// Saves the copy of edits the room could not merge ([`deckcraft_live::UNMERGED_TEXT`]).
+pub const SAVE_COPY_TEXT: &str = "Save a copy";
 /// Closes a notice.
 pub const DISMISS_TEXT: &str = "Dismiss";
 /// The accessible name of one editor's selected shape: `{name}`, `{shape}`, `{slide}`.
@@ -70,7 +73,7 @@ pub const CURSOR_NAME: &str = "{name}'s cursor in {shape}";
 pub const ON_SLIDE_NAME: &str = "{name} on slide {slide}";
 
 /// Every English key this module draws, for the translation report.
-pub const ENGLISH_KEYS: &[&str] = &[RESTORE_LABEL, VIEWING_TEXT, LIVE_TEXT, DISMISS_TEXT, SELECTION_NAME, CURSOR_NAME, ON_SLIDE_NAME];
+pub const ENGLISH_KEYS: &[&str] = &[RESTORE_LABEL, VIEWING_TEXT, LIVE_TEXT, SAVE_COPY_TEXT, DISMISS_TEXT, SELECTION_NAME, CURSOR_NAME, ON_SLIDE_NAME];
 
 /// The translation lookup for an English key. DeckCraft has no translation catalogue yet, so this
 /// is English as it stands; every live line goes through it so a catalogue needs one change.
@@ -141,6 +144,8 @@ pub struct LiveUi {
     bar: PresenceBar,
     notices: Vec<Notice>,
     sent: Option<SelKey>,
+    /// A copy of local edits the room could not merge, waiting to be saved: (file name, `.pptx`).
+    unmerged: Option<(String, Vec<u8>)>,
     /// Per editor: a signature of their selection's place and when it last changed (`ui` time).
     moved: HashMap<String, (u64, f64)>,
 }
@@ -155,6 +160,7 @@ impl LiveUi {
             bar: PresenceBar::new(),
             notices: Vec::new(),
             sent: None,
+            unmerged: None,
             moved: HashMap::new(),
         }
     }
@@ -206,6 +212,10 @@ impl LiveUi {
         self.bar.set(self.peers.iter().map(|p| Badge::new(p.id.clone(), p.display.clone())).collect());
         self.moved.retain(|id, _| ids.contains(id));
         self.take_notices();
+        // Taken after every pump: each hand-over since the last take is in the newest copy.
+        if let Some(copy) = self.live.take_unmerged() {
+            self.unmerged = Some(copy);
+        }
         let key = session.documents().iter().find(|d| d.uid == self.live.doc()).map(|st| {
             let sel = &st.selection;
             (sel.slide, sel.shapes.clone(), sel.text.as_ref().map(|t| (t.shape, t.anchor, t.caret, t.notes)))
@@ -239,7 +249,11 @@ impl LiveUi {
             // The window's own commands (views, panes, zoom) change nothing that is shared.
             return Ok(());
         }
-        let sections = session.documents().iter().find(|d| d.uid == self.live.doc()).is_some_and(|d| !d.doc.sections.is_empty() || !d.doc.custom_shows.is_empty());
+        let sections = session
+            .documents()
+            .iter()
+            .find(|d| d.uid == self.live.doc())
+            .is_some_and(|d| !d.doc.sections.is_empty() || !d.doc.custom_shows.is_empty());
         if sections && SLIDE_MOVES.contains(&engine) {
             return Err(SECTIONS_TEXT);
         }
@@ -293,12 +307,39 @@ impl SlideApp {
         }
         let Some(lu) = self.live.as_mut() else { return };
         if !lu.open(&self.session) {
+            // Closed: leave the room now, and keep what the room never got.
+            let copy = lu.live.take_unmerged().or_else(|| lu.unmerged.take());
             self.live = None;
+            if let Some((name, bytes)) = copy {
+                self.notify(tr(deckcraft_live::UNMERGED_TEXT));
+                self.save_unmerged(&name, &bytes);
+            }
             return;
         }
         lu.pump(&mut self.session);
         // Edits and carets from the room arrive without input: keep frames coming.
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
+    /// Hands the copy of unmerged edits to the person: a download on the web, a Save dialog on
+    /// the desktop.
+    pub(crate) fn save_unmerged(&mut self, name: &str, bytes: &[u8]) {
+        if let Some(download) = self.services.download.as_mut() {
+            download(name, bytes);
+            return;
+        }
+        let Some(path) = self.services.pick_save.as_mut().and_then(|pick| pick(name)) else {
+            self.set_status(tr(deckcraft_live::UNMERGED_TEXT));
+            return;
+        };
+        let written = match self.services.write.as_mut() {
+            Some(write) => write(&path, bytes),
+            None => write_file(&path, bytes),
+        };
+        match written {
+            Ok(()) => self.set_status(path),
+            Err(e) => self.set_status(e),
+        }
     }
 
     /// Why `id` is greyed now, when the live gate refuses it.
@@ -344,8 +385,19 @@ impl SlideApp {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn write_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(path, bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_file(_path: &str, _bytes: &[u8]) -> Result<(), String> {
+    Err(tr(deckcraft_live::UNMERGED_TEXT).to_owned())
+}
+
 /// What the person did in the live strip this frame.
 enum Act {
+    SaveCopy,
     Restore(Tomb),
     Dismiss,
     Follow(String),
@@ -357,36 +409,54 @@ pub(crate) fn status_strip(app: &mut SlideApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let (line, tip) = lu.status_line();
     let notice = lu.notices.last().cloned();
+    let copy_waiting = lu.unmerged.is_some();
     let mut act = None;
-    egui::Panel::bottom("live_status").exact_size(30.0).frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(10, 0))).show(ui, |ui| {
-        ui.horizontal_centered(|ui| {
-            let status = ui.add(egui::Label::new(egui::RichText::new(&line).size(12.0).color(t.text)).sense(Sense::hover()));
-            status.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &line));
-            if let Some(tip) = &tip {
-                status.on_hover_text(tip);
-            }
-            if let Some(n) = &notice {
-                ui.add_space(16.0);
-                let text = tr(&n.text).to_owned();
-                let l = ui.add(egui::Label::new(egui::RichText::new(&text).size(12.0).color(t.accent)));
-                l.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
-                if let Some(target) = &n.restore
-                    && ui.button(tr(RESTORE_LABEL)).clicked()
-                {
-                    act = Some(Act::Restore(*target));
+    egui::Panel::bottom("live_status").exact_size(30.0).frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(10, 0))).show(
+        ui,
+        |ui| {
+            ui.horizontal_centered(|ui| {
+                let status = ui.add(egui::Label::new(egui::RichText::new(&line).size(12.0).color(t.text)).sense(Sense::hover()));
+                status.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &line));
+                if let Some(tip) = &tip {
+                    status.on_hover_text(tip);
                 }
-                if ui.small_button("×").on_hover_text(tr(DISMISS_TEXT)).clicked() {
-                    act = Some(Act::Dismiss);
+                if copy_waiting {
+                    ui.add_space(16.0);
+                    let text = tr(deckcraft_live::UNMERGED_TEXT);
+                    let l = ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(t.accent)));
+                    l.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
+                    if ui.button(tr(SAVE_COPY_TEXT)).clicked() {
+                        act = Some(Act::SaveCopy);
+                    }
                 }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(id) = lu.bar.clone().badges_only().show(ui) {
-                    act = Some(Act::Follow(id));
+                if let Some(n) = &notice {
+                    ui.add_space(16.0);
+                    let text = tr(&n.text).to_owned();
+                    let l = ui.add(egui::Label::new(egui::RichText::new(&text).size(12.0).color(t.accent)));
+                    l.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
+                    if let Some(target) = &n.restore
+                        && ui.button(tr(RESTORE_LABEL)).clicked()
+                    {
+                        act = Some(Act::Restore(*target));
+                    }
+                    if ui.small_button("×").on_hover_text(tr(DISMISS_TEXT)).clicked() {
+                        act = Some(Act::Dismiss);
+                    }
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(id) = lu.bar.clone().badges_only().show(ui) {
+                        act = Some(Act::Follow(id));
+                    }
+                });
             });
-        });
-    });
+        },
+    );
     match act {
+        Some(Act::SaveCopy) => {
+            if let Some((name, bytes)) = lu.unmerged.take() {
+                app.save_unmerged(&name, &bytes);
+            }
+        }
         Some(Act::Restore(target)) => {
             lu.notices.pop();
             if let Err(e) = lu.restore(&mut app.session, target) {
@@ -454,7 +524,7 @@ pub(crate) fn canvas_marks(app: &mut SlideApp, ui: &Ui, painter: &egui::Painter,
             let r = Rect::from_points(&c).expand(2.0);
             outline = Some(outline.map_or(r, |o| o.union(r)));
             let name = fill(SELECTION_NAME, &[("name", &peer.display), ("shape", &sh.name), ("slide", &(here + 1).to_string())]);
-            hovered |= named_area(ui, r, ui.id().with(("live_sel", &peer.id, id.0)), &name);
+            hovered |= named_area(ui, r, ui.scope_id().with(("live_sel", &peer.id, id.0)), &name);
         }
         if let Some(c) = &at.caret
             && let TextTarget::Shape(id) = c.target
@@ -465,7 +535,7 @@ pub(crate) fn canvas_marks(app: &mut SlideApp, ui: &Ui, painter: &egui::Painter,
                 let (a, b) = (xf.to_screen(p0), xf.to_screen(p1));
                 painter.line_segment([a, b], stroke);
                 let name = fill(CURSOR_NAME, &[("name", &peer.display), ("shape", &sh.name)]);
-                named_area(ui, Rect::from_two_pos(a, b).expand(3.0), ui.id().with(("live_caret", &peer.id)), &name);
+                named_area(ui, Rect::from_two_pos(a, b).expand(3.0), ui.scope_id().with(("live_caret", &peer.id)), &name);
             }
         }
         let Some(outline) = outline else { continue };
@@ -506,7 +576,7 @@ pub(crate) fn slide_dots(app: &SlideApp, ui: &Ui, index: usize, img: Rect) {
         let c = pos2(x, img.min.y + 7.0);
         ui.painter().circle(c, 4.5, lu.colour(peer), Stroke::new(1.0, Color32::WHITE));
         let name = fill(ON_SLIDE_NAME, &[("name", &peer.display), ("slide", &(index + 1).to_string())]);
-        named_area(ui, Rect::from_center_size(c, vec2(10.0, 10.0)), ui.id().with(("live_dot", &peer.id, index)), &name);
+        named_area(ui, Rect::from_center_size(c, vec2(10.0, 10.0)), ui.scope_id().with(("live_dot", &peer.id, index)), &name);
         x -= 11.0;
     }
 }

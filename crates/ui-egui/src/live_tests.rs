@@ -266,19 +266,18 @@ fn slide_moves_in_a_deck_with_sections_are_greyed_with_why() {
 }
 
 #[test]
-#[ignore = "needs L5: DeckLive::restore is a stub returning NOT_YET at deck-m1/l4; un-ignore at the L5 merge"]
 fn restore_button_restores_the_shape() {
     let mut room = Room::editors(&deck(false));
     let doc = room.bob.doc();
     let beta = find(&doc, "beta");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("edit.select", json!({"ids": [beta.0]})).unwrap();
+    room.settle();
     room.bob.run("slide.go", json!({"index": 1}));
-    room.bob.run("edit.select", json!({"ids": [beta.0]}));
-    room.bob.run("edit.delete", json!({}));
+    room.bob.run("edit.delete", json!({"ids": [beta.0]}));
     room.settle();
     assert!(room.ann_doc().slides[1].shape(beta).is_none(), "Bob's delete reached Ann");
-    // What L5 hands Ann when Bob deletes a shape she was editing.
-    room.h.state_mut().live.as_mut().unwrap().push_notice(Notice { text: "Bob deleted this shape".into(), restore: Some(deckcraft_live::Tomb::Shape(beta)) });
-    room.h.run_steps(1);
+    room.h.get_by_label(&deckcraft_live::deleted_text("Bob"));
     room.h.get_by_role_and_label(Role::Button, RESTORE_LABEL).click();
     room.settle();
     assert!(room.ann_doc().slides[1].shape(beta).is_some(), "back for Ann");
@@ -289,7 +288,12 @@ fn restore_button_restores_the_shape() {
 fn restore_button_calls_restore_and_says_what_happened() {
     let mut room = Room::editors(&deck(false));
     let beta = find(&room.bob.doc(), "beta");
-    room.h.state_mut().live.as_mut().unwrap().push_notice(Notice { text: "Bob deleted this shape".into(), restore: Some(deckcraft_live::Tomb::Shape(beta)) });
+    room.h
+        .state_mut()
+        .live
+        .as_mut()
+        .unwrap()
+        .push_notice(Notice { text: "Bob deleted this shape".into(), restore: Some(deckcraft_live::Tomb::Shape(beta)) });
     room.h.run_steps(1);
     room.h.get_by_role_and_label(Role::Button, RESTORE_LABEL).click();
     room.h.run_steps(2);
@@ -378,6 +382,9 @@ impl craft_collab::Hub for Watched {
     }
     fn connected(&self) -> bool {
         self.0.connected()
+    }
+    fn set_space(&mut self, space: u32) {
+        self.0.set_space(space);
     }
 }
 
