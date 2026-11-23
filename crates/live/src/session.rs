@@ -271,11 +271,17 @@ impl<H: Hub> DeckLive<H> {
     /// ends the link itself: craft-live hands them over only for the breaks it makes in a pump
     /// (L5 review I1).
     ///
-    /// Nothing is kept while Live: what was sent is on the wire and will be ordered (re-review
-    /// N2); nor once Broken: craft-live hands the edits over at every break that drops them, and
-    /// its count stays above 0 for the rest of the session (re-review N1).
+    /// Nothing is kept while Live and really connected: what was sent is on the wire and will be
+    /// ordered (re-review N2). The status only refreshes in a pump, so a link that dropped since
+    /// the last pump still reads Live; then the edits never left and are kept (re-review 2 I2).
+    /// craft-live does not hand them over later: its pump takes `was_broken` before it starts,
+    /// so the end this session makes itself is never followed by a hand-over. Nothing is kept
+    /// once Broken: craft-live hands the edits over at every break it makes, and its count stays
+    /// above 0 for the rest of the session (re-review N1).
     fn keep_unconfirmed(&mut self) {
-        if matches!(self.core.status(), LiveStatus::Live { .. } | LiveStatus::Broken(_) | LiveStatus::ReadOnly) {
+        let status = self.core.status();
+        let sent = matches!(status, LiveStatus::Live { .. }) && self.core.live().connected();
+        if sent || matches!(status, LiveStatus::Broken(_) | LiveStatus::ReadOnly) {
             return;
         }
         if self.core.live().unconfirmed_edits() == 0 {
