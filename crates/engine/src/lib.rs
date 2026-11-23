@@ -595,16 +595,26 @@ impl Session {
     pub fn active(&self) -> Option<&DocState> {
         self.active.and_then(|i| self.docs.get(i))
     }
+    /// Content changes must go through [`Session::execute`] (or the pointer, key and text entry
+    /// points, or [`Session::apply_remote`]): changing the presentation through this bypasses the
+    /// edit observer, the undo history and the journal.
     pub fn active_mut(&mut self) -> Option<&mut DocState> {
         self.active.and_then(|i| self.docs.get_mut(i))
     }
     /// The open presentation with this [`DocState::uid`], active or not.
+    ///
+    /// Content changes must go through [`Session::execute`] (or the pointer, key and text entry
+    /// points, or [`Session::apply_remote`]): changing the presentation through this bypasses the
+    /// edit observer, the undo history and the journal.
     pub fn document_mut(&mut self, uid: u64) -> Option<&mut DocState> {
         self.docs.iter_mut().find(|d| d.uid == uid)
     }
     pub fn doc(&self) -> Result<&DocState> {
         self.active().ok_or(EngineError::NoDocument)
     }
+    /// Content changes must go through [`Session::execute`] (or the pointer, key and text entry
+    /// points, or [`Session::apply_remote`]): changing the presentation through this bypasses the
+    /// edit observer, the undo history and the journal.
     pub fn doc_mut(&mut self) -> Result<&mut DocState> {
         self.active_mut().ok_or(EngineError::NoDocument)
     }
@@ -746,6 +756,9 @@ impl Session {
     }
 
     /// Mutate the active presentation (copy-on-write) and bump the revision.
+    ///
+    /// For commands: called outside one, the change is not reported to the edit observer, has
+    /// no undo step and is not journaled.
     pub fn edit<T>(&mut self, f: impl FnOnce(&mut Presentation, &mut Selection) -> Result<T>) -> Result<T> {
         let st = self.doc_mut()?;
         let mut doc = (*st.doc).clone();
