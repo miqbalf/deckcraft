@@ -183,6 +183,18 @@ fn rebuild_into(ctx: &mut RemoteCtx, base: &Presentation, replica: &DeckDoc, t: 
     }
     let present: HashMap<SlideId, &Arc<Slide>> = cur.slides.iter().map(|s| (s.id, s)).collect();
     affected.extend(order.iter().filter(|id| !present.contains_key(id)).copied());
+    // A shape the replica has live that the engine lacks (brought back by a Restore, or new): its
+    // slide is rebuilt whole, so the delete routine's cleanup of its neighbours (a connector end,
+    // a group's extent), which the replica derives and never holds, is undone too (L5 review M1).
+    let mut whole = t.whole.clone();
+    for id in &t.shapes {
+        if let Some(e) = replica.shape(*id)
+            && !e.del
+            && slides_holding(cur, &BTreeSet::from([*id])).is_empty()
+        {
+            whole.insert(e.slide);
+        }
+    }
     let entries = r.entries_on(&affected);
     let mut slides = Vec::with_capacity(order.len());
     let mut deaths = Vec::new();
@@ -197,7 +209,7 @@ fn rebuild_into(ctx: &mut RemoteCtx, base: &Presentation, replica: &DeckDoc, t: 
         let Some((built, dead)) = r.slide(*id, &entries) else { continue };
         let mut built = built;
         if let Some(old) = old
-            && !t.whole.contains(id)
+            && !whole.contains(id)
         {
             let mut s = (*built).clone();
             keep_unchanged(&mut s.shapes, old, &t.shapes, 0);

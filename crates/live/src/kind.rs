@@ -15,6 +15,7 @@ pub struct Deck;
 /// One local edit, queued by the engine's observer and live undo hook and handed back to the
 /// mapping at the next flush.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum DeckEdit {
     /// A change the engine reported: one outer command, a pointer gesture at its drop, or an input
     /// method's commit. [`Edited::command`] is a label; the mapping reads only its `pointer:` prefix, to refuse a drop on a deleted shape (L5).

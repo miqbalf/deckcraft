@@ -98,7 +98,12 @@ fn a_drop_on_a_deleted_shape_is_refused_with_the_name() {
     assert!(r.peers[0].live.holding(), "the delete waits for the drop");
     r.peers[0].session.pointer(ev(PointerKind::Up, 220.0, 130.0)).expect("up");
     r.settle();
-    assert!(r.peers[0].notices.iter().any(|n| n.text == deleted_text("User 1")), "the drop is refused with the name: {:?}", r.peers[0].notices);
+    // The refusal is a line of its own, without Restore (the delete notice, if any, has it).
+    assert!(
+        r.peers[0].notices.iter().any(|n| n.text == deleted_text("User 1") && n.restore.is_none()),
+        "the drop is refused with the name: {:?}",
+        r.peers[0].notices
+    );
     assert!(r.peers[0].live.take_sent().iter().all(|g| !g.shapes.contains(&a)), "nothing of the drag went out");
     for i in 0..2 {
         assert!(text_of(&r, i, a).is_none(), "peer {i}: the shape stays deleted");
@@ -167,9 +172,13 @@ fn junk_del_on_a_tombstone_keeps_it_deleted() {
         d
     };
     let (mut x, mut y, mut z) = (peer(3), peer(4), peer(5));
+    let (s1, s2) = (deck.slides[1].id, deck.slides[2].id);
+    let b = find(&deck, "beta");
     let del = x
         .write(false, |t| {
-            t.set_del(Tomb::Shape(a), true, "user1");
+            for target in [Tomb::Shape(a), Tomb::Shape(b), Tomb::Slide(s1), Tomb::Slide(s2)] {
+                t.set_del(target, true, "user1");
+            }
             Ok(())
         })
         .expect("delete");
@@ -178,14 +187,40 @@ fn junk_del_on_a_tombstone_keeps_it_deleted() {
     let junk = z
         .write(false, |t| {
             t.set_shape(a, "del", json!("maybe"));
+            t.set_slide(s1, "del", json!({}));
             Ok(())
         })
         .expect("junk");
     y.apply(&junk).expect("apply");
+    // A removed `del` next to the deleter's name: the same, through raw yrs.
+    y.apply(&remove_del(&z, &[("shapes", b.0), ("slides", s2.0)])).expect("apply");
     let live = deck_from_doc(&deck, &y);
-    assert!(shape_of(&live, a).is_none(), "the tombstone stays");
-    assert!(y.shapes_of(deck.slides[0].id).iter().all(|id| *id != a), "the index reads it deleted too");
+    for id in [a, b] {
+        assert!(shape_of(&live, id).is_none(), "the tombstone stays");
+        assert!(y.shapes_of(deck.slides[0].id).iter().all(|x| *x != id), "the index reads it deleted too");
+    }
+    for s in [s1, s2] {
+        assert!(live.slides.iter().all(|x| x.id != s), "the slide stays deleted");
+        assert!(!y.slide_order().contains(&s), "the index reads the slide deleted too");
+    }
     assert_eq!(live, deck_from_state(&deck, &y.state()).expect("rebuild"), "live and rebuilt agree");
+}
+
+/// An update from a peer of `doc`'s state that removes the `del` key of each (root, id) entry.
+fn remove_del(doc: &DeckDoc, entries: &[(&str, u32)]) -> Vec<u8> {
+    use craft_collab::yrs::updates::decoder::Decode;
+    use craft_collab::yrs::{Doc, Map, Out, ReadTxn, Transact, Update};
+    let raw = Doc::with_client_id(77);
+    raw.transact_mut().apply_update(Update::decode_v1(&doc.state()).expect("state")).expect("apply");
+    let sv = raw.transact().state_vector();
+    for (root, id) in entries {
+        let map = raw.get_or_insert_map(*root);
+        let mut t = raw.transact_mut();
+        if let Some(Out::YMap(m)) = map.get(&t, &deckcraft_live::schema::id_key(*id)) {
+            m.remove(&mut t, "del");
+        }
+    }
+    raw.transact().encode_state_as_update_v1(&sv)
 }
 
 /// The relay grants a space past the id block range: editing goes on, and a minting command
@@ -205,6 +240,9 @@ fn a_space_past_the_block_range_still_edits() {
     let n = shapes(&r, i);
     let refused = r.peers[i].run("shape.insert", json!({"preset": "rect"})).expect_err("no block to mint from");
     assert_eq!(refused, deckcraft_live::NO_SPACE_TEXT);
+    // Honest (rule 15): a reopen gets a space from the same counter, so the text never offers it.
+    let lower = refused.to_lowercase();
+    assert!(!lower.contains("reopen") && lower.contains("copy"), "{refused}");
     assert_eq!(shapes(&r, i), n, "nothing was added");
     r.peers[i].run("shape.move", json!({"ids": [a.0], "dx": 40.0})).expect("a move is still shared");
     r.settle();
@@ -236,5 +274,55 @@ fn a_used_up_id_block_says_reopen() {
     r.settle();
     assert_eq!(r.peers[0].slide_ids().len(), slides, "no slide was added");
     assert_eq!(r.relay.seq(), seq, "nothing was sent");
+    r.assert_converged();
+}
+
+/// Restore takes back the delete's own cleanup too: the connector glued to the deleted shape is
+/// glued again, as in the base, on every peer.
+#[test]
+fn restore_reattaches_the_connector() {
+    let bytes = deck_bytes(|s| {
+        add_box(s, "target", [60.0, 60.0, 200.0, 80.0]);
+        add_box(s, "other", [400.0, 260.0, 200.0, 80.0]);
+        let doc = s.active().expect("doc").doc.clone();
+        let (t, o) = (find(&doc, "target"), find(&doc, "other"));
+        s.execute("shape.connect", &json!({"from": t.0, "to": o.0})).expect("connect");
+        s.execute("edit.deselect", &json!({})).expect("deselect");
+    });
+    let base = deck_of(&bytes);
+    let t = find(&base, "target");
+    let slide = base.slides[0].id;
+    assert!(mentions(&base, slide, t) >= 1, "the connector is glued to the target");
+    let mut r = Room::new(bytes, 2, 11);
+    r.peers[1].run("edit.delete", json!({"ids": [t.0]})).expect("delete");
+    r.settle();
+    assert_eq!(mentions(&r.peers[0].doc(), slide, t), 0, "the delete detached it");
+    let p = &mut r.peers[0];
+    p.live.restore(&mut p.session, Tomb::Shape(t)).expect("restore");
+    r.settle();
+    for (i, p) in r.peers.iter().enumerate() {
+        assert_eq!(p.doc().slides[0], base.slides[0], "peer {i}: the slide is the base's again, connector glued");
+    }
+    r.assert_converged();
+}
+
+/// My last 20 groups count without a selection; the 21st back does not.
+#[test]
+fn my_last_twenty_groups_count_without_a_selection() {
+    let mut r = Room::new(basic(), 2, 12);
+    let doc = r.peers[0].doc();
+    let (a, b, g) = (find(&doc, "alpha"), find(&doc, "beta"), find(&doc, "gamma"));
+    r.peers[0].run("shape.move", json!({"ids": [a.0], "dx": 5.0})).expect("move");
+    r.peers[0].run("shape.move", json!({"ids": [b.0], "dx": 5.0})).expect("move");
+    for _ in 0..19 {
+        r.peers[0].run("shape.move", json!({"ids": [g.0], "dx": 1.0})).expect("move");
+    }
+    r.peers[0].run("edit.deselect", json!({})).expect("deselect");
+    r.settle();
+    r.peers[1].run("edit.delete", json!({"ids": [a.0, b.0]})).expect("delete");
+    r.settle();
+    let offered = |t| r.peers[0].notices.iter().any(|n| n.restore == Some(t));
+    assert!(offered(Tomb::Shape(b)), "beta is in my last 20 groups");
+    assert!(!offered(Tomb::Shape(a)), "alpha is 21 groups back");
     r.assert_converged();
 }

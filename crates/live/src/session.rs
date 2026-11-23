@@ -23,10 +23,15 @@ use crate::unmerged::{copy_bytes, local_now};
 /// Another editor, with the selection as the host draws it.
 pub type Peer = LivePeer<DeckPos>;
 
-/// Why a minting command is refused once this peer's id block is used up.
-pub const NO_SPACE_TEXT: &str = "Reopen the file to keep adding shapes";
+/// Why a minting command is refused: this peer has no ids left to give new shapes and slides
+/// (its block is used up, or the room's server handed out a space past the block range). A reopen
+/// takes a space from the same room, so the text does not offer it (rule 15, L5 review I2).
+pub const NO_SPACE_TEXT: &str = "New shapes and slides can't be added in this live session. Save a copy to keep your work; adding more needs a new live session for this file, or help from support.";
 /// Why a presentation over the seed limit opens for one person (Ruling D9).
 pub const TOO_LARGE_TEXT: &str = "This presentation is too large to edit live. It is open for you alone.";
+/// Local edits the other editors never got were kept as a copy: the host saves it
+/// ([`DeckLive::take_unmerged`]).
+pub const UNMERGED_TEXT: &str = "Some of your changes could not be merged with the other editors. A copy with them is ready to save.";
 /// Why a shared command is not taken now: the link is not live, or the ticket is read-only.
 pub const PAUSED_TEXT: &str = "Editing is paused until the link to the other editors is back";
 /// Why the link ended: the live presentation was closed here.
@@ -245,6 +250,7 @@ impl<H: Hub> DeckLive<H> {
         };
         if let Err(e) = r {
             log::warn!("deckcraft-live: a held change did not land: {e}");
+            self.keep_unconfirmed();
             self.core.end(craft_live::BROKEN);
         }
         self.clear_history(session);
@@ -286,6 +292,18 @@ impl<H: Hub> DeckLive<H> {
             return;
         }
         self.map.mine = self.core.live().doc().and_then(|d| crate::presence::mine(st, d));
+    }
+
+    /// Local edits the room does not have yet, kept as the unmerged copy before this session
+    /// ends the link itself: craft-live hands them over only for the breaks it makes in a pump
+    /// (L5 review I1).
+    fn keep_unconfirmed(&mut self) {
+        if self.core.live().unconfirmed_edits() == 0 {
+            return;
+        }
+        if let Some(state) = self.replica().map(DeckDoc::state) {
+            self.map.keep_unmerged(state);
+        }
     }
 
     /// The deletes found in this pump, as notices with Restore and the deleter's display name.
@@ -355,7 +373,9 @@ impl<H: Hub> DeckLive<H> {
         }
         self.activate(session)?;
         if id == "file.close" {
-            // Closing the live presentation ends the session first, as `stop` does.
+            // Closing the live presentation ends the session first, as `stop` does. Edits not
+            // yet in the room (made while reconnecting) are kept as the unmerged copy.
+            self.keep_unconfirmed();
             self.detach(session);
             self.core.end(CLOSED_TEXT);
             self.closed = true;
@@ -390,7 +410,10 @@ impl<H: Hub> DeckLive<H> {
             Class::NotYet => Err(NOT_YET_TEXT),
             Class::Media => Err(MEDIA_TEXT),
             Class::Free | Class::History if self.core.editable() => Ok(()),
-            Class::Free | Class::History => Err(if matches!(self.core.status(), LiveStatus::ReadOnly) { READ_ONLY_TEXT } else { PAUSED_TEXT }),
+            Class::Free | Class::History if matches!(self.core.status(), LiveStatus::ReadOnly) => Err(READ_ONLY_TEXT),
+            // Live or reconnecting, but too much waits to be sent (C9).
+            Class::Free | Class::History if self.core.not_editable() == craft_live::BUFFER_FULL => Err(craft_live::BUFFER_FULL),
+            Class::Free | Class::History => Err(PAUSED_TEXT),
         }
     }
 
@@ -439,21 +462,27 @@ impl<H: Hub> DeckLive<H> {
         self.map.refused = None;
         self.core.queue().push(DeckEdit::Restore(target));
         self.flush(session);
-        match self.map.refused.take() {
-            Some(why) => Err(why),
-            None => Ok(()),
+        if let Some(why) = self.map.refused.take() {
+            return Err(why);
         }
+        // craft-live can still refuse the group (the buffer filled, the link dropped): then the
+        // target is deleted still (L5 review M7).
+        if self.replica().is_some_and(|r| tombstoned(r, target).is_some()) {
+            return Err(if self.core.editable() { craft_live::BUFFER_FULL.to_owned() } else { self.core.not_editable() });
+        }
+        Ok(())
     }
 
     /// The `.pptx` bytes of the base + this replica's state, with the local edits craft-live was
     /// about to drop (a reset, a replica given up), and the copy's name ([`unmerged_name`]);
-    /// None otherwise. Taken once.
+    /// None otherwise. Taken once; every hand-over since the last take is in it. A notice
+    /// ([`UNMERGED_TEXT`]) says when one starts waiting: hosts call this after every pump.
     ///
     /// [`unmerged_name`]: crate::unmerged_name
     pub fn take_unmerged(&mut self) -> Option<(String, Vec<u8>)> {
         let u = self.map.unmerged.take()?;
         let at = u.at.or_else(local_now).unwrap_or_default();
-        match copy_bytes(&self.map.base, &u.state) {
+        match copy_bytes(&self.map.base, &u.states) {
             Ok(bytes) => Some((crate::unmerged::unmerged_name(&self.map.name, at), bytes)),
             Err(e) => {
                 log::warn!("deckcraft-live: the unmerged copy could not be built: {e}");

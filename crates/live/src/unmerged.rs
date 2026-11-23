@@ -19,15 +19,26 @@ pub fn unmerged_name(file_name: &str, at: NaiveDateTime) -> String {
     format!("{stem} (unmerged {}).pptx", at.format("%Y-%m-%d %H%M"))
 }
 
-/// The replica's state with the local edits the room lacks, waiting for the host.
+/// The replica's states with the local edits the room lacks, waiting for the host: one per
+/// hand-over, oldest first, merged into one copy when taken.
 pub(crate) struct Unmerged {
-    pub state: Vec<u8>,
+    pub states: Vec<Vec<u8>>,
     /// When it was handed over (stamped after the pump, on the wall clock).
     pub at: Option<NaiveDateTime>,
 }
 
-/// The `.pptx` bytes of `base` + `state`.
-pub(crate) fn copy_bytes(base: &Presentation, state: &[u8]) -> Result<Vec<u8>, String> {
+/// The `.pptx` bytes of `base` + every state in `states` (yrs updates of one document, so their
+/// merge holds each one's edits).
+pub(crate) fn copy_bytes(base: &Presentation, states: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let merged;
+    let state = match states {
+        [one] => one.as_slice(),
+        _ => {
+            let parts: Vec<&[u8]> = states.iter().map(Vec::as_slice).collect();
+            merged = craft_collab::yrs::merge_updates_v1(&parts).map_err(|e| e.to_string())?;
+            merged.as_slice()
+        }
+    };
     let deck = deck_from_state(base, state).map_err(|e| e.to_string())?;
     deckcraft_engine::cmd::file::save_bytes(&deck, "pptx").map_err(|e| e.to_string())
 }
