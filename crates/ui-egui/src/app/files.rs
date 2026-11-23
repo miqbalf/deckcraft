@@ -179,74 +179,12 @@ impl SlideApp {
         }
     }
 
-    /// The file name a save or export suggests: the presentation's title with `ext`.
-    fn suggested_name(&self, ext: &str) -> String {
-        let name = self.session.active().map(|d| d.title()).unwrap_or_else(|| "Presentation".into());
-        format!("{name}.{ext}")
-    }
-
-    /// Exports the active presentation as `fmt` (`pdf`, `png`, `pngAll`, `jpeg`, `jpegAll`, `pptx`,
-    /// `deckcraft`, `outline`) through `file.export`: the save picker on the desktop, a download
-    /// on the web. `extra` adds `file.export` params (the PDF's layout, slides…). The
-    /// presentation keeps its own file. Returns whether a file was written or handed over.
-    pub fn export_as(&mut self, fmt: &str, extra: Value) -> bool {
-        let Some(slide) = self.session.active().map(|d| d.selection.slide) else { return false };
-        let (ext, format, all) = match fmt {
-            "pdf" => ("pdf", "pdf", false),
-            "png" => ("png", "png", false),
-            "pngAll" => ("png", "png", true),
-            "jpeg" | "jpg" => ("jpg", "jpeg", false),
-            "jpegAll" => ("jpg", "jpeg", true),
-            "pptx" => ("pptx", "pptx", false),
-            "outline" | "txt" => ("txt", "outline", false),
-            "rtf" => ("rtf", "rtf", false),
-            "deckcraft" => ("deckcraft", "deckcraft", false),
-            "gif" => ("gif", "gif", false),
-            other => {
-                self.set_status(format!("DeckCraft can't export “{other}”"));
-                return false;
-            }
-        };
-        let suggested = self.suggested_name(ext);
-        if let Some(pick) = self.services.pick_save.as_mut() {
-            let Some(path) = pick(&suggested) else { return false };
-            let mut params = json!({"path": path, "format": format, "all": all});
-            if let (Some(o), Some(x)) = (params.as_object_mut(), extra.as_object()) {
-                o.extend(x.clone());
-            }
-            return match self.run("file.export", params) {
-                Ok(_) => {
-                    self.set_status(format!("Exported {path}"));
-                    true
-                }
-                Err(_) => false,
-            };
-        }
-        let Some(doc) = self.session.active().map(|d| d.doc.clone()) else { return false };
-        let bytes = match format {
-            "png" | "jpeg" => {
-                // Every slide for "all slides", one download each, named like the desktop export (#64).
-                let name = self.session.active().map(|d| d.title()).unwrap_or_else(|| "Presentation".into());
-                let mut any = false;
-                let transparent = extra.get("transparentBackground").and_then(Value::as_bool).unwrap_or(false);
-                for (file, bytes) in web_image_files(&doc, slide, all, &name, ext, transparent) {
-                    any = self.download(&file, Ok(bytes)) || any;
-                }
-                return any;
-            }
-            "pdf" => deckcraft_engine::cmd::file::pdf_bytes(&doc, &extra),
-            "gif" => deckcraft_engine::cmd::file::gif_bytes(&doc, &extra),
-            other => deckcraft_engine::cmd::file::save_bytes(&doc, other),
-        };
-        self.download(&suggested, bytes)
-    }
-
     /// Hands `bytes` to the browser as a download (web); false (with the reason in the status
     /// bar) when there are no bytes or no way to download.
-    fn download(&mut self, name: &str, bytes: deckcraft_engine::Result<Vec<u8>>) -> bool {
+    pub(super) fn download(&mut self, name: &str, mime: &str, bytes: deckcraft_engine::Result<Vec<u8>>) -> bool {
         match (bytes, self.services.download.as_mut()) {
             (Ok(b), Some(dl)) => {
-                dl(name, &b);
+                dl(name, mime, &b);
                 true
             }
             (Err(e), _) => {
@@ -269,7 +207,7 @@ impl SlideApp {
         if self.services.pick_save.is_none() {
             // Web: the browser hands the PDF to the user.
             let bytes = deckcraft_engine::cmd::file::pdf_bytes(&doc, &params);
-            return self.download(&format!("{title}.pdf"), bytes);
+            return self.download(&format!("{title}.pdf"), "application/pdf", bytes);
         }
         let preview_path = match self.print_previews.create(&title) {
             Ok(path) => path,
@@ -454,10 +392,13 @@ impl SlideApp {
         }
     }
 
-    pub fn save_as_dialog(&mut self, format: &str) {
+    /// Plain Save of a presentation with no file of its own (never saved, or a repaired copy):
+    /// the system Save dialog on the desktop, and the file picked becomes the presentation's file,
+    /// as in PowerPoint; a `.deckcraft` download on the plain web. A page that keeps the files is
+    /// [`Self::save_to_host`]. This is Save, not Save As: Save As is [`Self::save_as_copy`].
+    fn save_untitled(&mut self) {
         let name = self.session.active().map(|d| d.title()).unwrap_or_else(|| "Presentation".into());
-        let ext = if format == "pptx" { "pptx" } else { "deckcraft" };
-        let suggested = format!("{name}.{ext}");
+        let suggested = format!("{name}.deckcraft");
         if let Some(pick) = self.services.pick_save.as_mut() {
             if let Some(path) = pick(&suggested) {
                 match self.session.execute("file.saveAs", &json!({"path": path})) {
@@ -470,12 +411,12 @@ impl SlideApp {
                 }
             }
         } else if self.services.host_save.is_some() {
-            let _ = self.save_to_host(Some(ext));
+            let _ = self.save_to_host();
         } else if let Some(dl) = self.services.download.as_mut()
             && let Some(d) = self.session.active()
         {
-            match deckcraft_engine::cmd::file::save_bytes(&d.doc, ext) {
-                Ok(bytes) => dl(&suggested, &bytes),
+            match deckcraft_engine::cmd::file::save_bytes(&d.doc, "deckcraft") {
+                Ok(bytes) => dl(&suggested, "application/zip", &bytes),
                 Err(e) => self.set_status(e.to_string()),
             }
         }
@@ -497,7 +438,7 @@ impl SlideApp {
 
     pub fn save(&mut self) {
         if self.services.host_save.is_some() {
-            let _ = self.save_to_host(None);
+            let _ = self.save_to_host();
             return;
         }
         if self.session.active().and_then(|d| d.path.clone()).is_some() {
@@ -506,24 +447,24 @@ impl SlideApp {
                 Err(e) => self.set_status(e.to_string()),
             }
         } else {
-            self.save_as_dialog("deckcraft");
+            self.save_untitled();
         }
     }
 
     /// Saves to the page that keeps the files ([`Services::host_save`](crate::Services::host_save)).
-    /// Save (`ext` `None`) writes the presentation's own file (the one the page sent, or the
-    /// last one saved there) in that file's format, as the desktop app does; a presentation with
-    /// no file of its own is a new `.deckcraft` file, the name Save suggests on the desktop. Save
-    /// As (`pptx`, `deckcraft`) is a new file named after the presentation. Once the page has the
-    /// bytes, the presentation is saved and that name is its file. Returns the name, or why it
-    /// wasn't saved (also shown in the status bar).
-    pub(super) fn save_to_host(&mut self, ext: Option<&str>) -> Result<String, String> {
+    /// Save writes the presentation's own file (the one the page sent, or the last one saved
+    /// there) in that file's format, as the desktop app does; a presentation with no file of its
+    /// own is a new `.deckcraft` file, the name Save suggests on the desktop. Once the page has the
+    /// bytes, the presentation is saved and that name is its file. Save As never comes here: it is
+    /// a download ([`Self::save_as_copy`]). Returns the name, or why it wasn't saved (also shown
+    /// in the status bar).
+    pub(super) fn save_to_host(&mut self) -> Result<String, String> {
         use deckcraft_engine::cmd::file::{format_for_path, mark_saved, save_bytes};
         let Some(d) = self.session.active() else { return Err("no presentation is open".into()) };
         let own = d.path.as_deref().and_then(|p| std::path::Path::new(p).file_name()).map(|n| n.to_string_lossy().to_string());
-        let (name, save_as) = match (ext, own) {
-            (None, Some(own)) => (own, false),
-            (ext, _) => (format!("{}.{}", d.title(), ext.unwrap_or("deckcraft")), true),
+        let (name, save_as) = match own {
+            Some(own) => (own, false),
+            None => (format!("{}.deckcraft", d.title()), true),
         };
         // A page that answers each save gets an id; the presentation counts as saved when it says so.
         let id = self.services.host_saves.confirms().then(|| self.services.host_saves.next_id());
@@ -612,7 +553,11 @@ impl SlideApp {
                 UiRequest::Message { text } => self.set_status(text),
                 UiRequest::PickFile { purpose } => {
                     if purpose == "saveAs" {
-                        self.save_as_dialog("deckcraft");
+                        // `file.save` of a presentation with no file: plain Save.
+                        self.save_untitled();
+                    } else if purpose == "saveAsCopy" && self.session.active().is_some() {
+                        // `file.saveAs` without a path: File › Save As, the one list.
+                        self.open_backstage(crate::backstage::Page::SaveAs);
                     }
                 }
                 UiRequest::Media { action, shape, ms } => {
@@ -808,30 +753,19 @@ impl SlideApp {
     }
 }
 
-/// Images for the browser download: the current slide, or every slide (named `<name>1.png`,
-/// `<name>2.png`... like the native export) when `all`. `transparent` leaves the slide
+/// Images for the browser download: the current slide, or every slide in order when `all`
+/// (the caller names them: `craft_share`'s numbered names). `transparent` leaves the slide
 /// background out (PNG only, #784).
-pub(crate) fn web_image_files(
-    doc: &deckcraft_model::Presentation,
-    current: usize,
-    all: bool,
-    name: &str,
-    ext: &str,
-    transparent: bool,
-) -> Vec<(String, Vec<u8>)> {
+pub(crate) fn web_image_files(doc: &deckcraft_model::Presentation, current: usize, all: bool, ext: &str, transparent: bool) -> Vec<Vec<u8>> {
     let slides: Vec<usize> = if all { (0..doc.slides.len()).collect() } else { vec![current] };
-    let single = slides.len() == 1;
     let scale = 2.0;
     let dpi = deckcraft_render::dpi_for_scale(scale);
     slides
         .into_iter()
-        .enumerate()
-        .map(|(k, i)| {
+        .map(|i| {
             let opts = deckcraft_render::RenderOpts { scale, transparent_background: transparent && ext == "png", ..Default::default() };
             let img = deckcraft_render::render_slide(doc, i, &opts);
-            let bytes = if ext == "png" { img.to_png_at(dpi) } else { img.to_jpeg_at(92, Some(dpi)) };
-            let file = if single { format!("{name}.{ext}") } else { format!("{name}{}.{ext}", k + 1) };
-            (file, bytes)
+            if ext == "png" { img.to_png_at(dpi) } else { img.to_jpeg_at(92, Some(dpi)) }
         })
         .collect()
 }

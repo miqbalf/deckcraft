@@ -20,6 +20,7 @@ mod ime;
 mod input;
 mod keys;
 mod playback;
+pub(crate) mod save_as;
 mod share;
 
 #[cfg(test)]
@@ -27,6 +28,7 @@ pub(crate) use clipboard::{OBJECTS_MARKER, system_clipboard_text};
 #[cfg(test)]
 pub(crate) use files::web_image_files;
 pub use keys::key_name;
+pub use save_as::SAVE_AS;
 
 /// How long a transient status message stays visible.
 const STATUS_LINGER_MS: f64 = 6000.0;

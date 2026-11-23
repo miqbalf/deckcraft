@@ -140,10 +140,11 @@ fn alt_f_arrows_enter_and_esc_drive_the_side_menu() {
     h.key_press(Key::ArrowDown);
     h.run_steps(2);
     assert_eq!(page(&h), Some(Page::Info));
-    // A presentation that was never saved goes to Save As, as in PowerPoint.
+    // Save runs Save (File › Save As makes copies): with no Save dialog here nothing is
+    // written and the page stays.
     h.key_press(Key::Enter);
     h.run_steps(2);
-    assert_eq!(page(&h), Some(Page::SaveAs));
+    assert_eq!(page(&h), Some(Page::Info));
     // Up from the top wraps to Options at the bottom.
     for _ in 0..20 {
         h.key_press(Key::ArrowUp);
@@ -270,8 +271,9 @@ fn open_lists_recent_files_and_opens_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Save As saves through the Save dialog and the presentation takes the new file; Export writes
-/// copies (PDF, another file type) and leaves the presentation's own file alone.
+/// Save of a presentation without a file asks where with the Save dialog and the presentation
+/// takes the new file; Export writes copies (PDF, another file type) and leaves the
+/// presentation's own file alone.
 #[test]
 fn save_as_and_export_run_the_file_commands() {
     let dir = temp_dir("saveas");
@@ -279,16 +281,13 @@ fn save_as_and_export_run_the_file_commands() {
     let mut h = harness(SlideApp::new(Session::with_new(), services));
     let title = h.state().session.active().unwrap().title();
 
-    // Save on a presentation without a file goes to Save As.
+    // Save on a presentation without a file asks where (plain Save, not the Save As copy).
     h.state_mut().run("app.backstage", json!({})).unwrap();
     h.run_steps(3);
     click_nav(&h, "Save");
     h.run_steps(3);
-    assert_eq!(page(&h), Some(Page::SaveAs));
-    click_on_page(&h, "Save");
-    h.run_steps(3);
-    let pptx = dir.join(format!("{title}.pptx")).to_string_lossy().to_string();
-    assert!(std::path::Path::new(&pptx).is_file(), "saved as PowerPoint by default");
+    let pptx = dir.join(format!("{title}.deckcraft")).to_string_lossy().to_string();
+    assert!(std::path::Path::new(&pptx).is_file(), "saved as .deckcraft, as Save suggests");
     assert_eq!(h.state().session.active().unwrap().path.as_deref(), Some(pptx.as_str()));
     assert!(h.state().backstage.is_none(), "a save returns to the slide");
 
@@ -309,7 +308,7 @@ fn save_as_and_export_run_the_file_commands() {
     h.run_steps(3);
     assert!(dir.join(format!("{title}.txt")).is_file());
     assert_eq!(h.state().session.active().unwrap().path.as_deref(), Some(pptx.as_str()), "exports are copies");
-    assert_eq!(*asked.borrow(), vec![format!("{title}.pptx"), format!("{title}.pdf"), format!("{title}.txt")]);
+    assert_eq!(*asked.borrow(), vec![format!("{title}.deckcraft"), format!("{title}.pdf"), format!("{title}.txt")]);
 
     // Save with a file saves in place and goes back.
     h.state_mut().run("slide.new", json!({})).unwrap();
@@ -368,10 +367,10 @@ fn change_file_type_exports_all_slides_as_pictures() {
     click_on_page(&h, "Save As");
     h.run_steps(3);
     for k in 1..=3 {
-        let jpg = std::fs::read(dir.join(format!("{title}{k}.jpg"))).unwrap();
+        let jpg = std::fs::read(dir.join(format!("{title}-{k}.jpg"))).unwrap();
         assert!(jpg.starts_with(&[0xFF, 0xD8]), "slide {k} is a JPEG");
     }
-    assert!(!dir.join(format!("{title}4.jpg")).exists(), "one picture per slide");
+    assert!(!dir.join(format!("{title}-4.jpg")).exists(), "one picture per slide");
 
     h.state_mut().run("app.backstage", json!({"page": "export"})).unwrap();
     h.run_steps(3);
@@ -384,7 +383,7 @@ fn change_file_type_exports_all_slides_as_pictures() {
     click_on_page(&h, "Save As");
     h.run_steps(3);
     for k in 1..=3 {
-        let png = std::fs::read(dir.join(format!("{title}{k}.png"))).unwrap();
+        let png = std::fs::read(dir.join(format!("{title}-{k}.png"))).unwrap();
         let img = deckcraft_render::decode_image(&png).unwrap();
         assert_eq!(img.get_pixel(2, 2).0[3], 0, "slide {k} leaves the background out");
     }
@@ -401,7 +400,8 @@ fn save_as_type_list_shows_every_type() {
     h.run_steps(3);
     h.get_by_label("Save as type").click();
     h.run_steps(3);
-    let (last, label, _) = crate::backstage::SAVE_TYPES[crate::backstage::SAVE_TYPES.len() - 1];
+    let formats = crate::SAVE_AS.formats();
+    let (last, label) = (formats[formats.len() - 1].id, formats[formats.len() - 1].label);
     h.get_by_label(label).click();
     h.run_steps(3);
     assert_eq!(h.state().backstage.as_ref().map(|b| b.file_type), Some(last));
@@ -459,7 +459,7 @@ fn host_close_prompt_keeps_the_presentation_when_the_save_fails() {
     for fail in [true, false] {
         let services = Services {
             host_save: Some(Box::new(move |_: &str, _: &[u8], _: bool, _: Option<&str>| if fail { Err("the page is gone".into()) } else { Ok(()) })),
-            download: Some(Box::new(|_: &str, _: &[u8]| {})),
+            download: Some(Box::new(|_: &str, _: &str, _: &[u8]| {})),
             ..Default::default()
         };
         let mut h = harness(SlideApp::new(Session::with_new(), services));
@@ -480,20 +480,20 @@ fn host_close_prompt_keeps_the_presentation_when_the_save_fails() {
     }
 }
 
-/// Framed by a page that keeps the files, Save As › Save under the presentation's own name goes
-/// back to the slide once the page has the file. The bug this prevents: that save leaves the
-/// file and the dirty flag as they were, so the Save As page stayed open and a second click sent
-/// the file again.
+/// Framed by a page that keeps the files, File › Save As downloads a copy (its button says
+/// Download) and goes back to the slide. Nothing is posted to the page, and the presentation stays
+/// the page's file with its unsaved changes.
 #[test]
-fn host_save_as_under_the_same_name_returns_to_the_slide() {
+fn host_save_as_downloads_a_copy_and_returns_to_the_slide() {
     let got: Rc<RefCell<Vec<(String, bool)>>> = Default::default();
-    let saves = got.clone();
+    let downloads: Rc<RefCell<Vec<String>>> = Default::default();
+    let (saves, dl) = (got.clone(), downloads.clone());
     let services = Services {
         host_save: Some(Box::new(move |name: &str, _: &[u8], save_as: bool, _: Option<&str>| {
             saves.borrow_mut().push((name.to_string(), save_as));
             Ok(())
         })),
-        download: Some(Box::new(|_: &str, _: &[u8]| {})),
+        download: Some(Box::new(move |name: &str, _: &str, _: &[u8]| dl.borrow_mut().push(name.to_string()))),
         ..Default::default()
     };
     let mut app = SlideApp::new(Session::new(), services);
@@ -503,10 +503,12 @@ fn host_save_as_under_the_same_name_returns_to_the_slide() {
     let mut h = harness(app);
     h.state_mut().run("app.backstage", json!({"page": "saveAs"})).unwrap();
     h.run_steps(3);
-    click_on_page(&h, "Save");
+    click_on_page(&h, "Download");
     h.run_steps(3);
-    assert_eq!(*got.borrow(), [("deck.pptx".to_string(), true)]);
-    assert!(h.state().backstage.is_none(), "the save returns to the slide");
+    assert!(got.borrow().is_empty(), "nothing went to the page");
+    assert_eq!(*downloads.borrow(), ["deck.pptx"]);
+    assert_eq!(h.state().session.active().unwrap().path.as_deref(), Some("deck.pptx"));
+    assert!(h.state().backstage.is_none(), "the copy returns to the slide");
 }
 
 /// Info shows the presentation's counts and properties, and edits them through file.properties.

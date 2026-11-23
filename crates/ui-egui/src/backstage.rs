@@ -4,8 +4,8 @@
 //!
 //! A side menu on the left picks a page (Home, New, Open, Info, Save As, Print, Export, About);
 //! Save, Close and Options act at once. Every action runs an existing command through
-//! [`SlideApp::run`] or one of the app's file helpers ([`SlideApp::export_as`],
-//! [`SlideApp::print_pdf`], [`SlideApp::save_as_dialog`]); the state here is UI-only and never
+//! [`SlideApp::run`] or one of the app's file helpers ([`SlideApp::save_as_copy`],
+//! [`SlideApp::print_pdf`], [`SlideApp::save`]); the state here is UI-only and never
 //! saved. Recent presentations are listed by path: nothing on disk is read until one is picked.
 //!
 //! Laid out after PowerPoint for Windows (observed black-box): a 160-point side menu darker than
@@ -24,8 +24,8 @@ mod print;
 
 pub use files::split_path;
 use files::{home, new_page, open_page};
+pub use info::format_bytes;
 use info::{PROPERTIES, about, commit_props, info, save_as};
-pub use info::{SAVE_TYPES, format_bytes};
 use print::{export, print};
 pub use print::{print_page_size, print_params, print_slides};
 
@@ -197,7 +197,7 @@ pub struct Backstage {
     pub print_landscape: bool,
     pub preview_page: usize,
     pub export: ExportTask,
-    /// Export › Change File Type / Save As: the chosen type (an [`SAVE_TYPES`] id).
+    /// Export › Change File Type / Save As: the chosen type (a [`crate::SAVE_AS`] id).
     pub file_type: &'static str,
     pub handouts_per_page: u8,
     pub pdf_hidden: bool,
@@ -260,15 +260,12 @@ pub(crate) fn act(app: &mut SlideApp, nav: Nav, current: Page) -> Option<Page> {
     match nav {
         Nav::Page(p) => Some(p),
         Nav::Save => {
-            // A page that keeps the files (`host_save`) saves as the desktop does.
+            // A page that keeps the files (`host_save`) saves as the desktop does. A presentation
+            // that was never saved asks where with the Save dialog: File › Save As makes copies.
             let web = app.services.pick_save.is_none() && app.services.download.is_some() && app.services.host_save.is_none();
-            let has_path = app.session.active().is_some_and(|d| d.path.is_some());
-            if !has_path && !web {
-                // A presentation that was never saved goes to Save As first, as in PowerPoint.
-                return Some(Page::SaveAs);
-            }
             app.save();
-            let saved = app.session.active().is_some_and(|d| !d.is_dirty());
+            // Saved means a file now holds it: a cancelled dialog leaves an untitled one as it was.
+            let saved = app.session.active().is_some_and(|d| !d.is_dirty() && (d.path.is_some() || app.services.host_save.is_some()));
             if saved || web { None } else { Some(current) }
         }
         Nav::Share => {

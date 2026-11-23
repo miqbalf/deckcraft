@@ -707,25 +707,15 @@ fn dlg_rename_section(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     ok || cancel
 }
 
-/// Export…: the format (PDF, PNG or JPEG of the current slide or of every slide, PowerPoint,
-/// outline, animated GIF, RTF) and its options; Export hands them to [`SlideApp::export_as`].
+/// Export…: the format (every one in [`crate::SAVE_AS`], the File › Save As list) and its options;
+/// Export hands them to [`SlideApp::save_as_copy`].
 /// Returns true when the dialog should close.
 fn dlg_export(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     ui.label("Export the presentation as:");
     let fmt = d.get("fmt", "pdf");
-    for (l, f) in [
-        ("PDF document (.pdf)", "pdf"),
-        ("PNG images (current slide)", "png"),
-        ("PNG images (all slides)", "pngAll"),
-        ("JPEG image (current slide)", "jpeg"),
-        ("JPEG images (all slides)", "jpegAll"),
-        ("PowerPoint Presentation (.pptx)", "pptx"),
-        ("Outline (.txt)", "outline"),
-        ("Animated GIF (.gif)", "gif"),
-        ("Outline/RTF (.rtf)", "rtf"),
-    ] {
-        if ui.radio(fmt == f, l).clicked() {
-            d.fields.insert("fmt".into(), f.into());
+    for f in crate::SAVE_AS.formats() {
+        if ui.radio(fmt == f.id, f.label).clicked() {
+            d.fields.insert("fmt".into(), f.id.into());
         }
     }
     let pdf_layout = d.get("pdfLayout", "slides");
@@ -807,7 +797,7 @@ fn dlg_export(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             _ if png && d.get("pngTransparent", "false") == "true" => json!({"transparentBackground": true}),
             _ => json!({}),
         };
-        app.export_as(&fmt, extra);
+        app.save_as_copy(&fmt, extra);
     }
     ok || cancel
 }

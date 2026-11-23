@@ -1,6 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::updates_ui;
-use super::{SlideApp, UI_COMMANDS, Value, ViewMode, backstage, dialogs, doc_window, json, media, qat, theme};
+use super::{SlideApp, UI_COMMANDS, Value, ViewMode, backstage, dialogs, doc_window, json, media, qat, save_as, theme};
 
 fn grid_options_touched(p: &Value) -> bool {
     ["spacing", "snap", "smartGuides", "gridlines", "guides"].iter().any(|k| p.get(*k).is_some())
@@ -24,7 +24,7 @@ impl SlideApp {
             // A page that keeps the files (`?host=parent`): Save by id (the command palette) goes
             // to the page like Ctrl+S. The engine would write to the presentation's path, which a
             // browser can't.
-            self.save_to_host(None).map(|name| json!({"path": name}))
+            self.save_to_host().map(|name| json!({"path": name}))
         } else {
             self.session.execute(id, &params).map_err(|e| e.to_string())
         };
@@ -246,7 +246,21 @@ impl SlideApp {
             "app.insertAudioDialog" => self.pick_and_insert("audio", "insert.audio"),
             "app.reuseSlidesDialog" => self.pick_and_reuse(p.get("keepFormatting").and_then(Value::as_bool).unwrap_or(false)),
             "app.insertVideoDialog" => self.pick_and_insert("video", "insert.video"),
-            "app.saveAsDialog" => self.save_as_dialog("deckcraft"),
+            "app.saveAsDialog" => {
+                // Save As = Export: File › Save As lists every format; with a `format` (a
+                // `SAVE_AS` id or a `file.export` format) the copy is made at once.
+                if self.session.active().is_none() {
+                    return Err("File › Save As needs an open presentation".into());
+                }
+                match p.get("format").and_then(Value::as_str) {
+                    Some(f) => {
+                        let all = p.get("all").and_then(Value::as_bool).unwrap_or(false);
+                        let id = save_as::save_as_id(f, all).ok_or_else(|| format!("DeckCraft can't export “{f}”"))?;
+                        return Ok(json!({"saved": self.save_as_copy(id, p.clone())}));
+                    }
+                    None => self.open_backstage(backstage::Page::SaveAs),
+                }
+            }
             "app.exportDialog" => self.dialog = Some(dialogs::Dialog::new("export")),
             "file.share" => return self.share(),
             "app.pasteSpecial" => self.dialog = Some(dialogs::Dialog::new("pasteSpecial")),

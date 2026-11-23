@@ -26,7 +26,7 @@ fn host_app(fail: bool) -> (SlideApp, Got) {
             saves.borrow_mut().push((name.to_string(), save_as, bytes.to_vec()));
             Ok(())
         })),
-        download: Some(Box::new(move |name: &str, bytes: &[u8]| downloads.borrow_mut().push((name.to_string(), false, bytes.to_vec())))),
+        download: Some(Box::new(move |name: &str, _: &str, bytes: &[u8]| downloads.borrow_mut().push((name.to_string(), false, bytes.to_vec())))),
         ..Default::default()
     };
     // Host mode starts as the web shell starts it: an empty presentation for the page's file.
@@ -58,8 +58,8 @@ fn path(app: &SlideApp) -> Option<String> {
 }
 
 /// The bug this prevents: Save of a .pptx the page sent came back as `<name>.deckcraft`. Save
-/// now hands the page the opened file under its own name and format, not as a new file; Save As
-/// says it is a new file and becomes the file the next Save writes.
+/// now hands the page the opened file under its own name and format, not as a new file. Save As
+/// is a download (a copy): it never reaches the page and the next Save still goes to the file.
 #[test]
 fn host_saves_go_back_to_the_opened_file() {
     let (mut app, got) = host_app(false);
@@ -69,11 +69,10 @@ fn host_saves_go_back_to_the_opened_file() {
     app.save();
     assert!(!app.session.active().unwrap().is_dirty());
     edit(&mut app);
-    app.save_as_dialog("deckcraft");
-    assert!(!app.session.active().unwrap().is_dirty());
-    edit(&mut app);
+    assert!(app.save_as_copy("deckcraft", json!({})));
+    assert!(app.session.active().unwrap().is_dirty(), "a copy leaves the changes unsaved");
     app.save();
-    let names = [("Lecture 3.pptx", false), ("Lecture 3.deckcraft", true), ("Lecture 3.deckcraft", false)];
+    let names = [("Lecture 3.pptx", false), ("Lecture 3.deckcraft", false), ("Lecture 3.pptx", false)];
     assert_eq!(calls(&got), names.map(|(n, s)| (n.to_string(), s)));
     // The first save is a .pptx that reopens with the edit in it.
     let first = got.borrow()[0].2.clone();
@@ -112,7 +111,7 @@ fn host_exports_and_print_are_copies() {
     let (mut app, got) = host_app(false);
     app.open_from_host(Some("deck.pptx"), &pptx(1));
     edit(&mut app);
-    assert!(app.export_as("pdf", json!({})));
+    assert!(app.save_as_copy("pdf", json!({})));
     assert!(app.print_pdf(json!({})));
     assert_eq!(calls(&got), [("deck.pdf".to_string(), false), ("deck.pdf".to_string(), false)]);
     assert!(app.session.active().unwrap().is_dirty());

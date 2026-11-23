@@ -99,7 +99,7 @@ fn export_dialog_writes_an_animated_gif() {
     harness.run_steps(2);
     harness.state_mut().run("app.exportDialog", json!({})).unwrap();
     harness.run_steps(2);
-    harness.get_by_label("Animated GIF (.gif)").click_accesskit();
+    harness.get_by_label("Animated GIF (*.gif)").click_accesskit();
     harness.run_steps(2);
     assert_eq!(harness.state().dialog.as_ref().and_then(|d| d.fields.get("fmt")).map(String::as_str), Some("gif"));
     harness.get_by_label("Seconds per slide:");
@@ -151,10 +151,10 @@ fn export_dialog_writes_a_png_with_a_transparent_background() {
     harness.state_mut().run("app.exportDialog", json!({})).unwrap();
     harness.run_steps(2);
     assert!(harness.query_by_label("Transparent background").is_none(), "PDF has no transparent background");
-    harness.get_by_label("JPEG image (current slide)").click_accesskit();
+    harness.get_by_label("JPEG Picture (*.jpg)").click_accesskit();
     harness.run_steps(2);
     assert!(harness.query_by_label("Transparent background").is_none(), "nor has JPEG");
-    harness.get_by_label("PNG images (current slide)").click_accesskit();
+    harness.get_by_label("PNG Picture (*.png)").click_accesskit();
     harness.run_steps(2);
     harness.get_by_label("Transparent background").click_accesskit();
     harness.run_steps(2);

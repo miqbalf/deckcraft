@@ -363,7 +363,16 @@ pub fn handle(app: &mut SlideApp, ctx: &egui::Context, req: &ControlRequest) -> 
             wrap(app.open_path(path).map(|_| Value::Null))
         }
         "app.save" => wrap(app.run("file.save", p.clone())),
-        "app.export" => wrap(app.run("file.export", p.clone())),
+        // With a path automation writes that file; without one it is Save As = Export: a
+        // download on the web, the Save dialog on the desktop.
+        "app.export" if p.get("path").is_some() => wrap(app.run("file.export", p.clone())),
+        "app.export" => {
+            let mut p = if p.is_object() { p.clone() } else { json!({}) };
+            if p.get("format").is_none() {
+                p["format"] = json!("pdf");
+            }
+            wrap(app.run("app.saveAsDialog", p))
+        }
         "app.quit" => {
             // Automation quits without asking (`{"save": true}` saves first).
             if p.get("save").and_then(Value::as_bool) == Some(true) && !app.save_all() {
