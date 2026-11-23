@@ -3,7 +3,7 @@
 //! unchanged shapes their value; shapes newly tombstoned go through the engine's delete routine
 //! ([`RemoteCtx::delete_shapes`], Ruling D7). The local caret moves with the text around it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use deckcraft_engine::{EngineError, RemoteCtx, Session, TextSel};
@@ -14,6 +14,7 @@ use crate::build::{Rebuild, deck_from_doc};
 use crate::doc::{DeckChange, DeckDoc};
 use crate::kind::{from_flat, to_flat};
 use crate::local::region;
+use crate::presence::{Mine, place, same_caret};
 use crate::text::edit_ops;
 
 /// What to bring the engine in line with.
@@ -120,7 +121,18 @@ fn body_of(p: &Presentation, slide: SlideId, c: &TextSel) -> Option<Vec<Paragrap
 
 /// Bring document `doc` of `session` in line with `t` in `replica`. Err([`EngineError::RemoteBusy`])
 /// while a drag or a composition is open: the caller holds `t`.
-pub(crate) fn land(session: &mut Session, doc: u64, base: &Presentation, replica: &DeckDoc, t: &Targets) -> Result<(), EngineError> {
+///
+/// The local text caret stays on the same characters: by its sticky indexes (`mine`, spec H2) when
+/// they were taken for the caret the engine has now, otherwise by the minimal edit around it.
+/// After a sticky placement, `mine` is kept for the placed caret.
+pub(crate) fn land(
+    session: &mut Session,
+    doc: u64,
+    base: &Presentation,
+    replica: &DeckDoc,
+    t: &Targets,
+    mine: &mut Option<Mine>,
+) -> Result<(), EngineError> {
     let Some(st) = session.documents().iter().find(|d| d.uid == doc) else { return Err(EngineError::NoDocument) };
     let at = st.doc.slides.get(st.selection.slide).map(|s| s.id);
     // The caret and the body it is in now (table cells are the engine's to clamp).
@@ -129,18 +141,33 @@ pub(crate) fn land(session: &mut Session, doc: u64, base: &Presentation, replica
         let old = body_of(&st.doc, slide, &c)?;
         Some((c, slide, old))
     });
-    session.apply_remote(doc, |ctx| {
+    let sticky = mine.as_ref().filter(|m| caret.as_ref().is_some_and(|(c, slide, _)| m.slide == *slide && same_caret(c, &m.sel))).cloned();
+    let mut placed = None;
+    let r = session.apply_remote(doc, |ctx| {
         rebuild_into(ctx, base, replica, t);
         if let Some((c, slide, old)) = caret {
             match body_of(ctx.presentation(), slide, &c) {
                 Some(new) if new == old => {}
                 // Always placed when its text changed (D4 review M2).
-                Some(new) => ctx.set_text(Some(moved_caret(&c, &old, &new))),
+                Some(new) => {
+                    let by_sticky = sticky.as_ref().and_then(|m| place(m, replica, &new));
+                    placed.clone_from(&by_sticky);
+                    ctx.set_text(Some(by_sticky.unwrap_or_else(|| moved_caret(&c, &old, &new))));
+                }
                 None => ctx.set_text(None),
             }
         }
         Ok(())
-    })
+    });
+    // The sticky indexes still name the caret the engine now shows (as it clamped it).
+    let now = session.documents().iter().find(|d| d.uid == doc).and_then(|d| d.selection.text.clone());
+    if r.is_ok()
+        && placed.is_some()
+        && let (Some(sel), Some(m)) = (now, mine.as_mut())
+    {
+        m.sel = sel;
+    }
+    r
 }
 
 fn rebuild_into(ctx: &mut RemoteCtx, base: &Presentation, replica: &DeckDoc, t: &Targets) {
@@ -156,6 +183,27 @@ fn rebuild_into(ctx: &mut RemoteCtx, base: &Presentation, replica: &DeckDoc, t: 
     }
     let present: HashMap<SlideId, &Arc<Slide>> = cur.slides.iter().map(|s| (s.id, s)).collect();
     affected.extend(order.iter().filter(|id| !present.contains_key(id)).copied());
+    // A shape the replica has live that the engine lacks (brought back by a Restore, or new): its
+    // slide is rebuilt whole, so the delete routine's cleanup of its neighbours (a connector end,
+    // a group's extent), which the replica derives and never holds, is undone too (L5 review M1).
+    // The engine's shape ids, gathered in one walk per remote change (re-review N3).
+    let mut whole = t.whole.clone();
+    if !t.shapes.is_empty() {
+        let mut shown = HashSet::new();
+        for s in &cur.slides {
+            deckcraft_model::walk(&s.shapes, &mut |sh, _| {
+                shown.insert(sh.id);
+            });
+        }
+        for id in &t.shapes {
+            if !shown.contains(id)
+                && let Some(e) = replica.shape(*id)
+                && !e.del
+            {
+                whole.insert(e.slide);
+            }
+        }
+    }
     let entries = r.entries_on(&affected);
     let mut slides = Vec::with_capacity(order.len());
     let mut deaths = Vec::new();
@@ -170,7 +218,7 @@ fn rebuild_into(ctx: &mut RemoteCtx, base: &Presentation, replica: &DeckDoc, t: 
         let Some((built, dead)) = r.slide(*id, &entries) else { continue };
         let mut built = built;
         if let Some(old) = old
-            && !t.whole.contains(id)
+            && !whole.contains(id)
         {
             let mut s = (*built).clone();
             keep_unchanged(&mut s.shapes, old, &t.shapes, 0);

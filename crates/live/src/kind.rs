@@ -7,6 +7,7 @@ use deckcraft_model::text::{Paragraph, RunKind};
 use deckcraft_model::{ShapeId, SlideId};
 
 use crate::doc::{DeckDoc, TextTarget};
+use crate::presence::{Scene, StickyCaret};
 
 /// DeckCraft's [`LiveKind`].
 pub struct Deck;
@@ -14,14 +15,17 @@ pub struct Deck;
 /// One local edit, queued by the engine's observer and live undo hook and handed back to the
 /// mapping at the next flush.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum DeckEdit {
     /// A change the engine reported: one outer command, a pointer gesture at its drop, or an input
-    /// method's commit. [`Edited::command`] is a label only; the mapping never keys on it.
+    /// method's commit. [`Edited::command`] is a label; the mapping reads only its `pointer:` prefix, to refuse a drop on a deleted shape (L5).
     Command(Box<Edited>),
     /// The person asked for Undo (the engine's live undo hook).
     Undo,
     /// The person asked for Redo.
     Redo,
+    /// Bring back a deleted slide or shape (`del = false`), as a group of its own (L5).
+    Restore(crate::doc::Tomb),
 }
 
 /// Where another editor is, as the host draws it: the slide's index now, the selected shapes and
@@ -41,21 +45,29 @@ pub struct CaretPos {
     pub head: (usize, usize),
 }
 
-/// Another editor's selection as the mapping keeps it between edits: by stable id, with the
-/// position it resolves to now.
-#[derive(Clone, Debug, PartialEq)]
+/// Another editor's selection as the mapping keeps it between edits: by stable id, with its text
+/// caret as sticky indexes (L7). It is resolved to a [`DeckPos`] against this window's deck at each
+/// pump; what this window does not have is not drawn, and a deleted slide drops the caret.
+#[derive(Clone, Debug)]
 pub struct DeckCaret {
     pub slide: SlideId,
+    /// At most [`crate::presence::SHAPES_MAX`].
     pub shapes: Vec<ShapeId>,
-    pub caret: Option<CaretPos>,
-    pub(crate) pos: DeckPos,
+    pub text: Option<StickyCaret>,
+    pub(crate) scene: Scene,
+}
+
+impl PartialEq for DeckCaret {
+    fn eq(&self, o: &Self) -> bool {
+        (self.slide, &self.shapes, &self.text) == (o.slide, &o.shapes, &o.text)
+    }
 }
 
 impl DeckCaret {
     /// The position this caret resolves to now.
     #[must_use]
-    pub fn at(&self) -> &DeckPos {
-        &self.pos
+    pub fn at(&self) -> DeckPos {
+        self.scene.pos(self)
     }
 }
 
@@ -66,7 +78,7 @@ impl LiveKind for Deck {
     type Pos = DeckPos;
 
     fn pos(caret: &DeckCaret) -> DeckPos {
-        caret.pos.clone()
+        caret.at()
     }
 }
 

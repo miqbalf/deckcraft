@@ -9,7 +9,7 @@ use deckcraft_model::text::{Paragraph, TextBody};
 use deckcraft_model::{LayoutId, Presentation, Shape, ShapeId, ShapeKind, Slide, SlideId};
 
 use crate::doc::{DeckDoc, ShapeEntry, TextTarget, apply_shape_field, apply_slide_field, tree_in};
-use crate::schema::{BODY, DEL, LAYOUT, PARENT, POS, SLIDE, Z};
+use crate::schema::{BODY, LAYOUT, PARENT, POS, SLIDE, Z};
 
 /// The deck for `state` over `base`: equal for equal (base, state) on every target.
 pub fn deck_from_state(base: &Presentation, state: &[u8]) -> Result<Presentation, LiveError> {
@@ -88,13 +88,14 @@ impl<'a> Rebuild<'a> {
         Rebuild { b: Base::of(base), doc }
     }
 
-    /// The live slides in order, a junk `pos` read as the base's and a junk `del` as false.
+    /// The live slides in order, a junk `pos` read as the base's.
     pub(crate) fn order(&self) -> Vec<SlideId> {
         let mut order = Vec::new();
         for (id, e) in self.doc.slide_entries() {
             let junk = self.doc.slide_junk(*id);
             let bad = |k: &str| junk.is_some_and(|j| j.contains(k));
-            let del = e.del && !bad(DEL);
+            // A junk `del` already reads as the index decided (deleted when `delBy` names someone).
+            let del = e.del;
             let pos = if bad(POS) { self.b.slides.get(id).map(|(_, p)| p.clone()).unwrap_or_default() } else { e.pos.clone() };
             if !del {
                 order.push((*id, pos));
@@ -125,9 +126,6 @@ impl<'a> Rebuild<'a> {
                 }
                 if junk.contains(Z) {
                     e.z = placed.map(|p| p.2.clone()).unwrap_or_default();
-                }
-                if junk.contains(DEL) {
-                    e.del = false;
                 }
             }
             shapes.insert(*id, e);

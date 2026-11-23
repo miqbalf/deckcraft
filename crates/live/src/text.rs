@@ -56,7 +56,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use craft_collab::replica::{to_any, to_json};
+use craft_collab::replica::to_any;
 use craft_collab::yrs::types::Attrs;
 use craft_collab::yrs::types::text::YChange;
 use craft_collab::yrs::{Any, OffsetKind, Out, ReadTxn, Text, TextRef, TransactionMut};
@@ -64,6 +64,8 @@ use deckcraft_model::text::{ParaProps, Paragraph, Run, RunKind, RunProps, TextBo
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+
+use crate::doc::wire_json;
 
 /// The paragraph mark.
 pub const MARK: char = '\n';
@@ -272,7 +274,7 @@ fn unit_len(u: &Unit, kind: OffsetKind) -> u32 {
 }
 
 fn chunk_attrs(a: Option<Box<Attrs>>) -> Attributes {
-    a.map(|a| a.iter().filter(|(_, v)| !matches!(v, Any::Null)).map(|(k, v)| (k.to_string(), to_json(v))).collect()).unwrap_or_default()
+    a.map(|a| a.iter().filter(|(_, v)| !matches!(v, Any::Null)).map(|(k, v)| (k.to_string(), wire_json(v))).collect()).unwrap_or_default()
 }
 
 /// Run properties from run attributes, one field at a time: a value that does not read is left

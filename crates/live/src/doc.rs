@@ -107,7 +107,7 @@ impl std::fmt::Display for WriteError {
 impl std::error::Error for WriteError {}
 
 /// A slide or shape to tombstone or bring back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Tomb {
     Slide(SlideId),
     Shape(ShapeId),
@@ -390,13 +390,16 @@ impl DeckDoc {
         let txn = self.y.doc().transact();
         let mut bad = BTreeSet::new();
         let e = match Roots::entry(&self.roots.slides, &txn, id.0) {
-            Some(m) => SlideEntry {
-                pos: read_order(&m, &txn, POS).or(POS, String::new(), String::new(), &mut bad),
-                del: read_bool(&m, &txn, DEL).or(DEL, false, false, &mut bad),
-                del_by: read_by(&m, &txn).or(DEL_BY, None, None, &mut bad),
-                layout: LayoutId(read_id(&m, &txn, LAYOUT).or(LAYOUT, 0, 0, &mut bad)),
-                fields: read_fields(&m, &txn, &SLIDE_FIELDS, &mut bad, |k, v| apply_slide_field(&mut Slide::default(), k, v)),
-            },
+            Some(m) => {
+                let del_by = read_by(&m, &txn).or(DEL_BY, None, None, &mut bad);
+                SlideEntry {
+                    pos: read_order(&m, &txn, POS).or(POS, String::new(), String::new(), &mut bad),
+                    del: read_del(&m, &txn, del_by.is_some(), &mut bad),
+                    del_by,
+                    layout: LayoutId(read_id(&m, &txn, LAYOUT).or(LAYOUT, 0, 0, &mut bad)),
+                    fields: read_fields(&m, &txn, &SLIDE_FIELDS, &mut bad, |k, v| apply_slide_field(&mut Slide::default(), k, v)),
+                }
+            }
             None if self.roots.slides.get(&txn, &id_key(id.0)).is_some() => {
                 log::warn!("deckcraft-live: a slide entry is not a map; the base's slide is used");
                 bad.extend([POS, DEL, LAYOUT]);
@@ -419,12 +422,13 @@ impl DeckDoc {
                     let mut s = Shape { text: Some(TextBody::default()), ..Default::default() };
                     apply_shape_field(&mut s, k, v)
                 });
+                let del_by = read_by(&m, &txn).or(DEL_BY, None, None, &mut bad);
                 ShapeEntry {
                     slide: SlideId(read_id(&m, &txn, SLIDE).or(SLIDE, 0, 0, &mut bad)),
                     parent: (parent != 0).then_some(ShapeId(parent)),
                     z: read_order(&m, &txn, Z).or(Z, String::new(), String::new(), &mut bad),
-                    del: read_bool(&m, &txn, DEL).or(DEL, false, false, &mut bad),
-                    del_by: read_by(&m, &txn).or(DEL_BY, None, None, &mut bad),
+                    del: read_del(&m, &txn, del_by.is_some(), &mut bad),
+                    del_by,
                     // A text body is there when `body` is (Ruling D26 as amended in L3 fix round 1).
                     has_text: fields.contains_key(BODY),
                     fields,
@@ -561,25 +565,13 @@ impl DeckDoc {
     /// for bytes that do not decode or name another text.
     #[must_use]
     pub fn resolve(&self, target: TextTarget, sticky: &[u8]) -> Option<u32> {
-        let s = StickyIndex::decode_v1(sticky).ok()?;
-        let txn = self.y.doc().transact();
-        let t = self.roots.text(&txn, &target)?;
-        let off = s.get_offset(&txn)?;
-        let own: &craft_collab::yrs::branch::Branch = t.as_ref();
-        if off.branch != craft_collab::yrs::branch::BranchPtr::from(own) {
-            return None;
-        }
-        let kind = self.y.doc().offset_kind();
-        let mut sum = 0u32;
-        let mut n = 0u32;
-        for u in units(&txn, &t, kind) {
-            if sum >= off.index {
-                break;
-            }
-            sum += u;
-            n += 1;
-        }
-        Some(n)
+        resolve_in(self.y.doc(), &self.roots, &target, sticky)
+    }
+
+    /// A read handle on this replica's document that the presence code keeps between calls
+    /// (L7): it reads the same document until the replica is replaced.
+    pub(crate) fn view(&self) -> DocView {
+        DocView { doc: self.y.doc().clone(), roots: self.roots.clone() }
     }
 
     /// The encoded state's size, to hold against [`MAX_SEED_BYTES`](crate::schema::MAX_SEED_BYTES).
@@ -857,7 +849,7 @@ impl DeckTxn<'_> {
             KeyRef::Shape(id, k) => (&self.roots.shapes, id.0, k),
         };
         match Roots::entry(root, &self.txn, id)?.get(&self.txn, k)? {
-            Out::Any(a) => Some(to_json(&a)),
+            Out::Any(a) => Some(wire_json(&a)),
             _ => None,
         }
     }
@@ -901,6 +893,84 @@ fn seen_in(txn: &TransactionMut, e: &Event, slides: bool) -> Vec<Seen> {
     }
 }
 
+/// Where `sticky` is now in `target`'s text, in chars of the flat form. None while a write is
+/// open, or for bytes that do not decode or name another text.
+fn resolve_in(doc: &Doc, roots: &Roots, target: &TextTarget, sticky: &[u8]) -> Option<u32> {
+    let s = StickyIndex::decode_v1(sticky).ok()?;
+    let txn = read_txn(doc)?;
+    let t = roots.text(&txn, target)?;
+    let off = s.get_offset(&txn)?;
+    let own: &craft_collab::yrs::branch::Branch = t.as_ref();
+    if off.branch != craft_collab::yrs::branch::BranchPtr::from(own) {
+        return None;
+    }
+    let kind = doc.offset_kind();
+    let mut sum = 0u32;
+    let mut n = 0u32;
+    for u in units(&txn, &t, kind) {
+        if sum >= off.index {
+            break;
+        }
+        sum += u;
+        n += 1;
+    }
+    Some(n)
+}
+
+/// A read transaction for the presence code, which only ever reads outside the replica's writes:
+/// a failure is a bug (asserted in debug builds, logged in release ones), read as "nothing".
+fn read_txn(doc: &Doc) -> Option<craft_collab::yrs::Transaction<'_>> {
+    let txn = doc.try_transact();
+    debug_assert!(txn.is_ok(), "deckcraft-live: a presence read ran inside a write of the replica");
+    match txn {
+        Ok(t) => Some(t),
+        Err(e) => {
+            log::warn!("deckcraft-live: a presence read ran inside a write of the replica: {e:?}");
+            None
+        }
+    }
+}
+
+/// A read handle on a replica's document, kept by the presence code between the calls that hand
+/// it the replica: it resolves sticky indexes and says whether a slide is deleted. Reads are quiet
+/// (a peer's junk is logged by the replica's own index, not here).
+#[derive(Clone)]
+pub(crate) struct DocView {
+    doc: Doc,
+    roots: Roots,
+}
+
+/// What a replica knows of a slide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Known {
+    /// No entry (yet): an id from an update that has not arrived.
+    Unknown,
+    Live,
+    /// A tombstone.
+    Dead,
+}
+
+impl DocView {
+    /// See [`DeckDoc::resolve`].
+    pub(crate) fn resolve(&self, target: &TextTarget, sticky: &[u8]) -> Option<u32> {
+        resolve_in(&self.doc, &self.roots, target, sticky)
+    }
+
+    /// What the document knows of slide `id` now, by the index's rule for `del` (a junk value
+    /// reads as deleted when the entry names a deleter).
+    pub(crate) fn slide(&self, id: SlideId) -> Known {
+        let Some(txn) = read_txn(&self.doc) else { return Known::Unknown };
+        let Some(m) = Roots::entry(&self.roots.slides, &txn, id.0) else { return Known::Unknown };
+        let by = matches!(read_by(&m, &txn), Read::Good(Some(_)));
+        let dead = match read_bool(&m, &txn, DEL) {
+            Read::Good(b) => b,
+            Read::Absent => false,
+            Read::Junk => by,
+        };
+        if dead { Known::Dead } else { Known::Live }
+    }
+}
+
 /// One key as read: absent, read well, or present but unreadable (a peer's junk, logged).
 #[derive(Clone, Debug, PartialEq)]
 enum Read<T> {
@@ -940,12 +1010,39 @@ fn read_bool<T: ReadTxn>(m: &MapRef, txn: &T, key: &str) -> Read<bool> {
     }
 }
 
+/// `del`; a junk or removed value reads as deleted when the entry names a deleter (`delBy` is
+/// written with every delete and removed by every restore), so a peer's junk or a removed key
+/// cannot revive a tombstone (L3 review, L5 review M5), and as live otherwise.
+fn read_del<T: ReadTxn>(m: &MapRef, txn: &T, by: bool, bad: &mut BTreeSet<&'static str>) -> bool {
+    read_bool(m, txn, DEL).or(DEL, by, by, bad)
+}
+
 fn read_by<T: ReadTxn>(m: &MapRef, txn: &T) -> Read<Option<String>> {
     match m.get(txn, DEL_BY) {
         None => Read::Absent,
         Some(Out::Any(Any::String(s))) => Read::Good(Some(s.to_string())),
         Some(_) => Read::Junk,
     }
+}
+
+/// A yrs value as JSON, the same on every peer. yrs sends an integer outside ±`i32::MAX` as a
+/// float (lib0's number encoding), so the author reads a live-minted id inside a value (a
+/// connector's end, a link to a slide) as an integer and every other peer as a float, which a
+/// typed read of a `u32` refuses. An integral float beyond `i32::MAX` and within 2^53 therefore
+/// reads as the integer it was written as.
+pub(crate) fn wire_json(a: &Any) -> Value {
+    fn int(v: Value) -> Value {
+        match v {
+            Value::Number(n) if n.is_f64() => match n.as_f64() {
+                Some(f) if f.fract() == 0.0 && f.abs() > f64::from(i32::MAX) && f.abs() <= 9_007_199_254_740_992.0 => Value::from(f as i64),
+                _ => Value::Number(n),
+            },
+            Value::Array(a) => Value::Array(a.into_iter().map(int).collect()),
+            Value::Object(o) => Value::Object(o.into_iter().map(|(k, v)| (k, int(v))).collect()),
+            v => v,
+        }
+    }
+    int(to_json(a))
 }
 
 /// An id stored as a number.
@@ -973,7 +1070,7 @@ fn read_fields<T: ReadTxn>(
     for k in keys {
         let v = match m.get(txn, k) {
             None => continue,
-            Some(Out::Any(a)) => Some(to_json(&a)).filter(|v| valid(k, v)),
+            Some(Out::Any(a)) => Some(wire_json(&a)).filter(|v| valid(k, v)),
             Some(_) => None,
         };
         match v {

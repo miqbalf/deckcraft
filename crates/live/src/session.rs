@@ -10,21 +10,30 @@ use deckcraft_engine::{Edited, Session};
 use deckcraft_model::Presentation;
 use serde_json::{Value, json};
 
-use crate::app::{DeckApp, Mapping, SentGroup, caret_payload};
+use crate::app::{DeckApp, Mapping, SentGroup};
 use crate::doc::{DeckDoc, DeckSeed, Tomb};
 use crate::gate::{Class, MEDIA_TEXT, NOT_YET_TEXT, class};
 use crate::kind::{Deck, DeckEdit, DeckPos};
 use crate::remote::Targets;
 use crate::schema::MAX_SEED_BYTES;
 use crate::seed::base_sha256;
+use crate::tomb::{Tombs, line_for, tombstoned};
+use crate::unmerged::{copy_bytes, local_now};
 
 /// Another editor, with the selection as the host draws it.
 pub type Peer = LivePeer<DeckPos>;
 
-/// Why a minting command is refused once this peer's id block is used up.
-pub const NO_SPACE_TEXT: &str = "Reopen the file to keep adding shapes";
+/// Why a minting command is refused: this peer has no ids left to give new shapes and slides
+/// (its block is used up, or the room's server handed out a space past the block range). A reopen
+/// takes a space from the same room, so the text does not offer it (rule 15, L5 review I2).
+pub const NO_SPACE_TEXT: &str = "New shapes and slides can't be added in this live session. Save a copy to keep your work; adding more needs a new live session for this file, or help from support.";
 /// Why a presentation over the seed limit opens for one person (Ruling D9).
 pub const TOO_LARGE_TEXT: &str = "This presentation is too large to edit live. It is open for you alone.";
+/// Local edits the other editors never got were kept as a copy: the host saves it
+/// ([`DeckLive::take_unmerged`]).
+pub const UNMERGED_TEXT: &str = "Some of your changes could not be merged with the other editors. A copy with them is ready to save.";
+/// Why a Restore was not shared, when no more specific reason is known.
+pub const RESTORE_FAILED_TEXT: &str = "The deleted item could not be brought back. Try again.";
 /// Why a shared command is not taken now: the link is not live, or the ticket is read-only.
 pub const PAUSED_TEXT: &str = "Editing is paused until the link to the other editors is back";
 /// Why the link ended: the live presentation was closed here.
@@ -78,6 +87,7 @@ pub struct Notice {
 }
 
 type Clock = Box<dyn FnMut() -> f64 + Send>;
+type WallClock = Box<dyn FnMut() -> chrono::NaiveDateTime + Send>;
 
 /// A DeckCraft presentation edited live. Holds `LiveEditing<H, Deck>` directly, so the worker
 /// uses it as it is (Ruling D3).
@@ -89,6 +99,8 @@ pub struct DeckLive<H: Hub> {
     resync_told: bool,
     /// The live presentation was closed here: the session is over.
     closed: bool,
+    /// The person's local date and time, for the unmerged copy's name.
+    wall: Option<WallClock>,
 }
 
 impl<H: Hub> DeckLive<H> {
@@ -146,12 +158,19 @@ impl<H: Hub> DeckLive<H> {
             refused: None,
             notices: Vec::new(),
             sent: Vec::new(),
+            name,
+            tombs: Tombs::default(),
+            unmerged: None,
+            scene: crate::presence::Scene::default(),
+            mine: None,
         };
-        let mut live = DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false, closed: false };
+        let mut live =
+            DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false, closed: false, wall: None };
         if live.clock.lock().unwrap_or_else(PoisonError::into_inner).is_some() {
             live.share_clock();
         }
         live.bind(session);
+        live.see(session);
         Ok(live)
     }
 
@@ -210,10 +229,18 @@ impl<H: Hub> DeckLive<H> {
         self.pumps += 1.0;
         let now = self.now();
         self.end_stale_twist(session, now);
+        // What landed after the last pump (held changes, the touched slides) is where the other
+        // editors' carets are drawn from now on; my caret's sticky indexes are taken for where it
+        // is now, in case it moved without an edit (L7 review M6).
+        self.see(session);
+        self.keep_mine(session);
         let peers = {
             let mut app = DeckApp { session, map: &mut self.map, now };
             self.core.pump(&mut app)
         };
+        for p in &peers {
+            self.map.tombs.names.insert(craft_live::uid_of(&p.id).to_owned(), p.display.clone());
+        }
         self.after(session, now);
         peers
     }
@@ -227,14 +254,76 @@ impl<H: Hub> DeckLive<H> {
         };
         if let Err(e) = r {
             log::warn!("deckcraft-live: a held change did not land: {e}");
+            self.keep_unconfirmed();
             self.core.end(craft_live::BROKEN);
         }
         self.clear_history(session);
+        self.see(session);
+        self.keep_mine(session);
         if self.core.live().doc().is_some_and(DeckDoc::needs_resync) && !self.resync_told {
             // craft-live cannot replace a replica in place at this pin (L3): end the link, and a
             // reopened file builds a new one.
             self.resync_told = true;
             self.core.end(craft_live::BROKEN);
+        }
+        self.tell_deletes();
+        if let Some(u) = self.map.unmerged.as_mut()
+            && u.at.is_none()
+        {
+            u.at = Some(match self.wall.as_mut() {
+                Some(f) => f(),
+                None => local_now().unwrap_or_else(|| epoch_ms(now)),
+            });
+        }
+    }
+
+    /// The carets' scene: the engine's deck and the replica as they are now (L7).
+    fn see(&self, session: &Session) {
+        let st = session.documents().iter().find(|d| d.uid == self.map.doc);
+        self.map.scene.set_deck(st.map(|d| d.doc.clone()));
+        self.map.scene.set_view(self.core.live().doc().map(DeckDoc::view));
+        self.map.scene.set_held(self.map.held_texts());
+    }
+
+    /// This window's text caret as sticky indexes, taken again when it moved or the text
+    /// changed, so a remote text edit keeps it on the same characters (spec H2).
+    fn keep_mine(&mut self, session: &Session) {
+        let Some(st) = session.documents().iter().find(|d| d.uid == self.map.doc) else { return };
+        let Some(sel) = st.selection.text.as_ref() else {
+            self.map.mine = None;
+            return;
+        };
+        if self.map.mine.as_ref().is_some_and(|m| m.revision == st.revision && crate::presence::same_caret(&m.sel, sel)) {
+            return;
+        }
+        self.map.mine = self.core.live().doc().and_then(|d| crate::presence::mine(st, d));
+    }
+
+    /// Local edits the room does not have yet, kept as the unmerged copy before this session
+    /// ends the link itself: craft-live hands them over only for the breaks it makes in a pump
+    /// (L5 review I1).
+    ///
+    /// Nothing is kept while Live: what was sent is on the wire and will be ordered (re-review
+    /// N2); nor once Broken: craft-live hands the edits over at every break that drops them, and
+    /// its count stays above 0 for the rest of the session (re-review N1).
+    fn keep_unconfirmed(&mut self) {
+        if matches!(self.core.status(), LiveStatus::Live { .. } | LiveStatus::Broken(_) | LiveStatus::ReadOnly) {
+            return;
+        }
+        if self.core.live().unconfirmed_edits() == 0 {
+            return;
+        }
+        if let Some(state) = self.replica().map(DeckDoc::state) {
+            self.map.keep_unmerged(state);
+        }
+    }
+
+    /// The deletes found in this pump, as notices with Restore and the deleter's display name.
+    fn tell_deletes(&mut self) {
+        let pending = std::mem::take(&mut self.map.tombs.pending);
+        for (t, by) in pending {
+            let text = line_for(t, &self.map.tombs.name(&by));
+            self.map.notices.push(Notice { text, restore: Some(t) });
         }
     }
 
@@ -296,7 +385,11 @@ impl<H: Hub> DeckLive<H> {
         }
         self.activate(session)?;
         if id == "file.close" {
-            // Closing the live presentation ends the session first, as `stop` does.
+            // Closing the live presentation ends the session first, as `stop` does. Edits still
+            // queued go out first; those not yet in the room (made while reconnecting) are kept
+            // as the unmerged copy.
+            self.flush(session);
+            self.keep_unconfirmed();
             self.detach(session);
             self.core.end(CLOSED_TEXT);
             self.closed = true;
@@ -312,6 +405,8 @@ impl<H: Hub> DeckLive<H> {
             let e = e.to_string();
             match (e.contains(deckcraft_engine::cmd::NO_ID_SPACE), self.map.block.is_some()) {
                 (true, true) => NO_SPACE_TEXT.to_owned(),
+                // A space was granted outside the block range: no block will come (N2).
+                (true, false) if self.map.space != 0 => NO_SPACE_TEXT.to_owned(),
                 // No space granted yet: the empty block minted nothing.
                 (true, false) => craft_live::CONNECTING.to_owned(),
                 (false, _) => e,
@@ -329,7 +424,10 @@ impl<H: Hub> DeckLive<H> {
             Class::NotYet => Err(NOT_YET_TEXT),
             Class::Media => Err(MEDIA_TEXT),
             Class::Free | Class::History if self.core.editable() => Ok(()),
-            Class::Free | Class::History => Err(if matches!(self.core.status(), LiveStatus::ReadOnly) { READ_ONLY_TEXT } else { PAUSED_TEXT }),
+            Class::Free | Class::History if matches!(self.core.status(), LiveStatus::ReadOnly) => Err(READ_ONLY_TEXT),
+            // Live or reconnecting, but too much waits to be sent (C9).
+            Class::Free | Class::History if self.core.not_editable() == craft_live::BUFFER_FULL => Err(craft_live::BUFFER_FULL),
+            Class::Free | Class::History => Err(PAUSED_TEXT),
         }
     }
 
@@ -350,20 +448,77 @@ impl<H: Hub> DeckLive<H> {
         self.core.editable()
     }
 
-    /// Tells the room where this window's selection and caret are (held to five a second).
+    /// Tells the room where this window's selection and caret are, in stable ids and sticky text
+    /// indexes ([`crate::presence`]; held to five a second). A read-only window sends it too.
     pub fn send_selection(&mut self, session: &Session) {
         let Some(st) = session.documents().iter().find(|d| d.uid == self.map.doc) else { return };
-        if let Some(p) = caret_payload(st) {
+        if let Some(p) = crate::presence::payload_with(st, self.core.live().doc(), self.map.mine.as_ref()) {
             self.core.send_presence(p);
         }
     }
 
-    /// Brings back a deleted slide or shape (L5).
+    /// Brings back a deleted slide or shape: `del = false` for it, for the groups above a shape
+    /// and for its slide when they are deleted too, as one new group. Every peer shows it again,
+    /// with what was typed into it meanwhile. Nothing to do when it is not deleted.
     ///
     /// # Errors
-    /// Not available until L5.
-    pub fn restore(&mut self, _session: &mut Session, _target: Tomb) -> Result<(), String> {
-        Err(NOT_YET_TEXT.to_owned())
+    /// Why it cannot be done now (the link, read-only, closed).
+    pub fn restore(&mut self, session: &mut Session, target: Tomb) -> Result<(), String> {
+        if self.closed {
+            return Err(CLOSED_TEXT.to_owned());
+        }
+        if !self.core.editable() {
+            return Err(self.core.not_editable());
+        }
+        if self.replica().is_none_or(|r| tombstoned(r, target).is_none()) {
+            return Ok(());
+        }
+        self.map.refused = None;
+        self.core.queue().push(DeckEdit::Restore(target));
+        self.flush(session);
+        if let Some(why) = self.map.refused.take() {
+            return Err(why);
+        }
+        // craft-live can still refuse the group (the buffer filled, the link dropped): then the
+        // target is deleted still (L5 review M7).
+        if self.replica().is_some_and(|r| tombstoned(r, target).is_some()) {
+            let live = self.core.live();
+            return Err(if !self.core.editable() {
+                self.core.not_editable()
+            } else if live.buffer_full() {
+                craft_live::BUFFER_FULL.to_owned()
+            } else if !live.ready_to_type() {
+                // The replica is damaged or given up (L5 re-review N4).
+                craft_live::BROKEN.to_owned()
+            } else {
+                RESTORE_FAILED_TEXT.to_owned()
+            });
+        }
+        Ok(())
+    }
+
+    /// The `.pptx` bytes of the base + this replica's state, with the local edits craft-live was
+    /// about to drop (a reset, a replica given up), and the copy's name ([`unmerged_name`]);
+    /// None otherwise. Taken once; every hand-over since the last take is in it. A notice
+    /// ([`UNMERGED_TEXT`]) says when one starts waiting: hosts call this after every pump.
+    ///
+    /// [`unmerged_name`]: crate::unmerged_name
+    pub fn take_unmerged(&mut self) -> Option<(String, Vec<u8>)> {
+        let u = self.map.unmerged.take()?;
+        let at = u.at.or_else(local_now).unwrap_or_default();
+        match copy_bytes(&self.map.base, &u.states) {
+            Ok(bytes) => Some((crate::unmerged::unmerged_name(&self.map.name, at), bytes)),
+            Err(e) => {
+                log::warn!("deckcraft-live: the unmerged copy could not be built: {e}");
+                None
+            }
+        }
+    }
+
+    /// The person's local date and time, for the unmerged copy's name (a browser host passes
+    /// the page's; native hosts have the system's by default).
+    pub fn set_wall_clock(&mut self, clock: Box<dyn FnMut() -> chrono::NaiveDateTime + Send>) {
+        self.wall = Some(clock);
     }
 
     /// The clock the link and the hold budget run on, in ms (a browser host passes the page's).
@@ -412,9 +567,17 @@ impl<H: Hub> DeckLive<H> {
 
     /// Ends the session: the observer and the undo hook come off, the engine's history is cleared
     /// (its snapshots predate the peers' changes) and the id block is dropped, so the
-    /// presentation is an ordinary one again.
-    pub fn stop(mut self, session: &mut Session) {
+    /// presentation is an ordinary one again. Returns the unmerged copy ([`DeckLive::take_unmerged`])
+    /// when local edits never reached the room: the host saves it, as for any other copy.
+    #[must_use = "the unmerged copy holds edits the other editors never got"]
+    pub fn stop(mut self, session: &mut Session) -> Option<(String, Vec<u8>)> {
+        if !self.closed {
+            // As `file.close` does: queued edits go out, those the room lacks are kept.
+            self.flush(session);
+            self.keep_unconfirmed();
+        }
         self.detach(session);
+        self.take_unmerged()
     }
 
     fn detach(&mut self, session: &mut Session) {
@@ -427,6 +590,13 @@ impl<H: Hub> DeckLive<H> {
             Arc::make_mut(&mut st.doc).id_block = None;
         }
     }
+}
+
+/// `ms` on the session's clock read as Unix time (a web host's page clock), when nothing better
+/// is known.
+fn epoch_ms(ms: f64) -> chrono::NaiveDateTime {
+    let ms = ms as i64;
+    chrono::DateTime::from_timestamp_millis(ms).map(|d| d.naive_utc()).unwrap_or_default()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
