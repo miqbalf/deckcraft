@@ -75,7 +75,7 @@ use std::rc::Rc;
 
 use craft_live::LiveStatus;
 use craft_web_host::Mode;
-use craft_web_host::live::{LiveMessage, LiveState, Peer as HostPeer};
+use craft_web_host::live::{LiveMessage, LiveState, LiveStatus as HostStatus, Peer as HostPeer};
 use craft_web_host::web::{FileData, Host, Message, fetch_font};
 use deckcraft_live::{BaseFile, DeckLive, LiveFail};
 use deckcraft_ui_egui::live::BoxHub;
@@ -213,14 +213,15 @@ impl Bridge {
     }
 
     /// After each frame: tell the host when unsaved changes appear or go away (the crate does not
-    /// repeat a state it already reported).
+    /// repeat a state it already reported). A live room is saved by its document service, so
+    /// only unconfirmed edits and a copy not saved yet count while live.
     pub fn report_dirty(&self, app: &SlideApp) {
-        // A live room is saved by its document service, so nothing here is unsaved.
-        self.host.post_dirty(!self.live_on.get() && app.session.documents().iter().any(|d| d.is_dirty()));
+        let docs_dirty = app.session.documents().iter().any(|d| d.is_dirty());
+        self.host.post_dirty(crate::live_ticket::page_dirty(self.live_on.get(), docs_dirty, app.live_unconfirmed(), app.copies_unsaved()));
     }
 
     fn post_save(&self, path: &str, bytes: &[u8], save_as: bool, id: Option<&str>) -> Result<(), String> {
-        let name = bare_name(path);
+        let name = crate::live_ticket::bare_name(path);
         if let Some(why) = crate::live_ticket::save_refusal(self.live_on.get(), self.live_asked.get(), &name) {
             return Err(deckcraft_ui_egui::live::tr(why).to_owned());
         }
@@ -228,14 +229,20 @@ impl Bridge {
     }
 
     /// The copy of unmerged edits, as a new file (`saveAs: true`). A host that answers saves gets
-    /// an id for it, as for any copy, so a failure is shown.
-    fn post_copy(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+    /// an id for it, so the window keeps the copy until the page says it saved (or failed); a
+    /// message that could not be posted is an error at once, with no answer queued.
+    fn post_copy(&self, path: &str, bytes: &[u8]) -> Result<Option<String>, String> {
         let id = self.saves.copy_id();
-        let posted = self.host.post_save(&bare_name(path), bytes, id.as_deref(), true);
-        if let (Err(e), Some(id)) = (&posted, id) {
-            self.saves.answer(HostAnswer::Failed { id, error: e.clone() });
+        let (name, save_as) = crate::live_ticket::copy_save(path);
+        match self.host.post_save(&name, bytes, id.as_deref(), save_as) {
+            Ok(()) => Ok(id),
+            Err(e) => {
+                if let Some(id) = id {
+                    self.saves.finish_copy(&id);
+                }
+                Err(e)
+            }
         }
-        posted
     }
 
     /// Hear `deckcraft:open` and queue the file for the next frame.
@@ -274,11 +281,6 @@ impl Bridge {
             ctx.request_repaint();
         });
     }
-}
-
-/// The last part of `path`, as the page names files.
-fn bare_name(path: &str) -> String {
-    std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string())
 }
 
 /// Fetch each font a host offered (one at a time, same-origin only, size-capped by the bridge) and
@@ -350,6 +352,7 @@ impl Bridge {
                         events.borrow_mut().push(LiveEvent::End(reason));
                         ctx.request_repaint();
                     }
+                    Next::Ignore => {}
                     Next::Refresh => {
                         events.borrow_mut().push(LiveEvent::Ticket(message.ticket().to_owned()));
                         ctx.request_repaint();
@@ -429,11 +432,8 @@ impl Live {
             match event {
                 LiveEvent::Newer => tell(app, NEWER_TEXT),
                 LiveEvent::Unusable => tell(app, UNUSABLE_TEXT),
-                LiveEvent::End(reason) => {
-                    if let Some(live) = app.live.as_mut() {
-                        live.live_mut().core_mut().end(reason);
-                    }
-                }
+                // Edits the room never confirmed come back as the copy (Review C1).
+                LiveEvent::End(reason) => app.end_live_for(reason),
                 LiveEvent::Failed(e) => {
                     log::error!("live file not fetched: {e}");
                     // A ticket that came during the fetch is older than the next join's.
@@ -453,11 +453,10 @@ impl Live {
     }
 
     /// After each frame: hand a copy of unmerged edits to the page as soon as there is one
-    /// (Ruling D18), and tell the page how the session stands.
+    /// (Ruling D18; not again after the page failed to save one), and tell the page how the
+    /// session stands.
     pub fn after(&mut self, app: &mut SlideApp, bridge: &Bridge) {
-        if app.copies_waiting() {
-            app.offer_waiting_copies();
-        }
+        app.hand_over_copies();
         self.report(app, bridge);
     }
 
@@ -469,9 +468,10 @@ impl Live {
                 craft_collab::web::WebHub::connect_as(&message.relay_url, message.ticket(), None, Some(&deckcraft_live::schema()))
                     .map_err(|e| e.to_string())
             })
+            .map_err(|e| (e, None))
             .and_then(|hub| {
                 let base = BaseFile { bytes, name: &message.file_name, expected_sha256: Some(hash) };
-                DeckLive::start(BoxHub(Box::new(hub)), &message.room, &base, access, &uid, &mut app.session).map_err(|e| fail_text(&e))
+                DeckLive::start(BoxHub(Box::new(hub)), &message.room, &base, access, &uid, &mut app.session).map_err(|e| (fail_text(&e), Some(e)))
             });
         match started {
             Ok(mut live) => {
@@ -486,9 +486,10 @@ impl Live {
                     refresh_ticket(app, &ticket);
                 }
             }
-            Err(e) => {
-                // The page's next `live` (its refresh) tries again.
-                self.joining.borrow_mut().failed();
+            Err((e, fail)) => {
+                // The page's next `live` (its refresh) tries again, unless the file can never be
+                // edited live (Review M3).
+                self.joining.borrow_mut().start_failed(fail.as_ref());
                 self.pending = None;
                 log::error!("live editing did not start: {e}");
                 not_opened(app, &e);
@@ -499,7 +500,22 @@ impl Live {
     /// `live-state` to the page: at once when the state or its reason changes, otherwise at most
     /// once a second (peers, save marker).
     fn report(&mut self, app: &SlideApp, bridge: &Bridge) {
-        let Some(ui) = app.live.as_ref() else { return };
+        let Some(ui) = app.live.as_ref() else {
+            // The session ended in the window (the file closed): tell the page once (Review M1).
+            if bridge.live_on.replace(false) {
+                let closed = LiveState {
+                    state: HostStatus::Refused,
+                    reason: Some(deckcraft_ui_egui::live::tr(deckcraft_live::session::CLOSED_TEXT).to_owned()),
+                    saved_at: None,
+                    peers: Vec::new(),
+                };
+                if let Err(e) = bridge.host.post_live_state(&closed) {
+                    log::warn!("live-state not delivered: {e}");
+                }
+                self.reported = None;
+            }
+            return;
+        };
         let now = js_sys::Date::now();
         let status = ui.live().status();
         if let LiveStatus::Live { saved_at: Some(marker) } = status

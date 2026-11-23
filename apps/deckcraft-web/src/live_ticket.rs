@@ -9,6 +9,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use craft_live::{Access, LiveStatus};
 use craft_web_host::live::{LiveError, LiveStatus as HostStatus};
+use deckcraft_live::session::LiveFail;
 
 /// The window's end when the page sends a `live` message for another room after the join.
 pub const RESTARTED: &str = "The live session was restarted. Reopen the file.";
@@ -110,6 +111,9 @@ pub enum Joining {
     Opening,
     /// Joined this room, with this access.
     Joined(String, Access),
+    /// The file could not be edited live (too large, or not a presentation): it is open for one
+    /// person (or not at all), and later messages neither fetch nor open it again.
+    Refused,
 }
 
 /// What to do with a `live` message.
@@ -125,6 +129,8 @@ pub enum Next {
     /// A ticket for the room that no longer lets this window edit: the link ends
     /// ([`ACCESS_CHANGED`]).
     AccessDropped,
+    /// The file was refused for live editing: nothing to do.
+    Ignore,
 }
 
 impl Next {
@@ -134,7 +140,7 @@ impl Next {
         match self {
             Next::Restarted => Some(RESTARTED),
             Next::AccessDropped => Some(ACCESS_CHANGED),
-            Next::Open | Next::Refresh => None,
+            Next::Open | Next::Refresh | Next::Ignore => None,
         }
     }
 }
@@ -148,6 +154,7 @@ impl Joining {
                 Next::Open
             }
             Joining::Opening => Next::Refresh,
+            Joining::Refused => Next::Ignore,
             Joining::Joined(joined, _) if joined != room => Next::Restarted,
             Joining::Joined(_, Access::Edit) if access == Access::Read => Next::AccessDropped,
             Joining::Joined(..) => Next::Refresh,
@@ -159,10 +166,38 @@ impl Joining {
         *self = Joining::Idle;
     }
 
+    /// The join failed after the fetch: a file that can never be edited live (too large, or not a
+    /// presentation) is final, so refreshes do not open one more copy of it; anything else lets
+    /// the next message try again.
+    pub fn start_failed(&mut self, fail: Option<&LiveFail>) {
+        *self = if fail.is_some_and(|f| matches!(f, LiveFail::TooLarge | LiveFail::Open(_))) { Joining::Refused } else { Joining::Idle };
+    }
+
     /// The window joined `room` with `access`.
     pub fn joined(&mut self, room: &str, access: Access) {
         *self = Joining::Joined(room.to_owned(), access);
     }
+}
+
+/// The `save` message that hands the unmerged copy to the page: its bare file name, and always
+/// `saveAs: true` (a new file beside the original, never over it).
+#[must_use]
+pub fn copy_save(path: &str) -> (String, bool) {
+    (bare_name(path), true)
+}
+
+/// The last part of `path`, as the page names files.
+#[must_use]
+pub fn bare_name(path: &str) -> String {
+    std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string())
+}
+
+/// Whether the page should warn before the tab closes. While live the document service saves
+/// the file, so only edits the relay has not confirmed (reconnecting) or a copy of unmerged edits
+/// that is not saved yet count; otherwise any unsaved document does.
+#[must_use]
+pub fn page_dirty(live: bool, docs_dirty: bool, unconfirmed: bool, copies_unsaved: bool) -> bool {
+    copies_unsaved || if live { unconfirmed } else { docs_dirty }
 }
 
 /// Whether `name` is the presentation itself rather than an export (a PDF, a picture, an outline).
@@ -344,5 +379,41 @@ mod tests {
         assert_eq!(host_status(&LiveStatus::Broken("x".into())), (HostStatus::Refused, Some("x".into())));
         assert_eq!(host_status(&LiveStatus::Live { saved_at: None }), (HostStatus::Live, None));
         assert_eq!(host_status(&LiveStatus::ReadOnly).0, HostStatus::Readonly);
+    }
+
+    #[test]
+    fn a_deck_refused_for_live_is_not_fetched_or_opened_again() {
+        for fail in [LiveFail::TooLarge, LiveFail::Open("not a presentation".into())] {
+            let mut j = Joining::default();
+            assert_eq!(j.message("oc:1", Access::Edit), Next::Open);
+            j.start_failed(Some(&fail));
+            assert_eq!(j, Joining::Refused, "{fail}");
+            assert_eq!(j.message("oc:1", Access::Edit), Next::Ignore, "a refresh opens no second copy");
+            assert_eq!(j.message("oc:2", Access::Edit), Next::Ignore);
+            assert_eq!(Next::Ignore.end_reason(), None);
+        }
+        let mut j = Joining::default();
+        j.message("oc:1", Access::Edit);
+        j.start_failed(Some(&LiveFail::BaseMismatch));
+        assert_eq!(j.message("oc:1", Access::Edit), Next::Open, "a changed file is fetched again");
+        j.start_failed(None);
+        assert_eq!(j.message("oc:1", Access::Edit), Next::Open, "a failed fetch or connect tries again");
+    }
+
+    #[test]
+    fn the_unmerged_copy_is_saved_as_a_new_file_by_its_bare_name() {
+        assert_eq!(copy_save("/tmp/deck (unmerged 2026-11-24 10.00).pptx"), ("deck (unmerged 2026-11-24 10.00).pptx".to_owned(), true));
+        assert_eq!(copy_save("deck.pptx"), ("deck.pptx".to_owned(), true));
+    }
+
+    #[test]
+    fn the_page_is_told_of_unsaved_work_while_live_only_when_it_can_be_lost() {
+        // live, docs_dirty, unconfirmed, copies_unsaved
+        assert!(!page_dirty(true, true, false, false), "the service saves a live room");
+        assert!(page_dirty(true, false, true, false), "edits the relay has not confirmed (reconnecting)");
+        assert!(page_dirty(true, false, false, true), "a copy of unmerged edits waits");
+        assert!(page_dirty(false, false, false, true), "a copy waits after the link ended");
+        assert!(page_dirty(false, true, false, false));
+        assert!(!page_dirty(false, false, true, false));
     }
 }

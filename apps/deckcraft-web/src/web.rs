@@ -222,6 +222,13 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
                 log::error!("download of {name} failed: {e}");
             }
         })),
+        // The unmerged copy after the page failed to save it: always a browser download, also
+        // when the page takes the other saves.
+        download_copy: Some(Box::new(|name: &str, bytes: &[u8]| {
+            if let Err(e) = download(name, bytes) {
+                log::error!("download of {name} failed: {e}");
+            }
+        })),
         inbox: Some(inbox),
         ..Default::default()
     }
