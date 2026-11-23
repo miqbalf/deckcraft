@@ -861,7 +861,7 @@ impl DeckTxn<'_> {
             KeyRef::Shape(id, k) => (&self.roots.shapes, id.0, k),
         };
         match Roots::entry(root, &self.txn, id)?.get(&self.txn, k)? {
-            Out::Any(a) => Some(to_json(&a)),
+            Out::Any(a) => Some(wire_json(&a)),
             _ => None,
         }
     }
@@ -959,6 +959,26 @@ fn read_by<T: ReadTxn>(m: &MapRef, txn: &T) -> Read<Option<String>> {
     }
 }
 
+/// A yrs value as JSON, the same on every peer. yrs sends an integer outside ±`i32::MAX` as a
+/// float (lib0's number encoding), so the author reads a live-minted id inside a value (a
+/// connector's end, a link to a slide) as an integer and every other peer as a float, which a
+/// typed read of a `u32` refuses. An integral float beyond `i32::MAX` and within 2^53 therefore
+/// reads as the integer it was written as.
+pub(crate) fn wire_json(a: &Any) -> Value {
+    fn int(v: Value) -> Value {
+        match v {
+            Value::Number(n) if n.is_f64() => match n.as_f64() {
+                Some(f) if f.fract() == 0.0 && f.abs() > f64::from(i32::MAX) && f.abs() <= 9_007_199_254_740_992.0 => Value::from(f as i64),
+                _ => Value::Number(n),
+            },
+            Value::Array(a) => Value::Array(a.into_iter().map(int).collect()),
+            Value::Object(o) => Value::Object(o.into_iter().map(|(k, v)| (k, int(v))).collect()),
+            v => v,
+        }
+    }
+    int(to_json(a))
+}
+
 /// An id stored as a number.
 fn read_id<T: ReadTxn>(m: &MapRef, txn: &T, key: &str) -> Read<u32> {
     let v = match m.get(txn, key) {
@@ -984,7 +1004,7 @@ fn read_fields<T: ReadTxn>(
     for k in keys {
         let v = match m.get(txn, k) {
             None => continue,
-            Some(Out::Any(a)) => Some(to_json(&a)).filter(|v| valid(k, v)),
+            Some(Out::Any(a)) => Some(wire_json(&a)).filter(|v| valid(k, v)),
             Some(_) => None,
         };
         match v {
