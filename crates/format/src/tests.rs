@@ -516,6 +516,20 @@ fn repair_keeps_a_duplicate_it_cannot_reid() {
     assert_eq!(p.slides[0].id, p.slides[1].id, "no fresh id was invented");
 }
 
+/// A bogus counter from a file (`next_id` in the live range, here `u32::MAX`) no longer counts as
+/// "every id used": `fix_next_id` brings it back to the highest real id, so a duplicate slide is
+/// re-id'd, below the live range (L3 ruling; W1 review M5).
+#[test]
+fn a_bogus_next_id_from_a_file_is_not_used_up() {
+    let mut p = Presentation { next_id: u32::MAX, ..Default::default() };
+    p.slides.push(p.slides[0].clone());
+    repair(&mut p);
+    assert_eq!(p.slides.len(), 2);
+    assert_ne!(p.slides[0].id, p.slides[1].id, "the duplicate got a fresh id");
+    assert!(p.slides.iter().all(|s| s.id.0 < deckcraft_model::LIVE_ID_BASE), "below the live range");
+    assert!(p.next_id < deckcraft_model::LIVE_ID_BASE);
+}
+
 /// A file whose shape ids reach just below the live range cannot make the loader mint a live id
 /// for a duplicate shape (L3 review Minor 7): the duplicate keeps its id, as with used-up ids.
 #[test]

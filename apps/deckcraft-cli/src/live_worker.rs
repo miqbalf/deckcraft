@@ -30,6 +30,8 @@ pub struct DeckService;
 pub struct DeckWorkerDoc<H: Hub> {
     live: DeckLive<H>,
     session: Session,
+    /// The room's document id (`doc:<room>`), for the log; never a ticket.
+    room: String,
 }
 
 impl DocumentService for DeckService {
@@ -48,7 +50,7 @@ impl DocumentService for DeckService {
         let base = BaseFile { bytes, name: file_name, expected_sha256: None };
         let mut session = Session::new();
         let live = DeckLive::start(hub, room, &base, Access::Edit, SERVICE_UID, &mut session).map_err(|e| e.to_string())?;
-        Ok(DeckWorkerDoc { live, session })
+        Ok(DeckWorkerDoc { live, session, room: room.to_owned() })
     }
 
     /// Every editor seeds from the base the app pinned when the room opened, so the worker does too:
@@ -98,15 +100,19 @@ impl<H: Hub> LiveDocument<H> for DeckWorkerDoc<H> {
     }
 
     /// The deck the checkpoint's state describes over the base (tombstones removed with the
-    /// engine's delete routine, Ruling D7), written as `.pptx`. The state is never compared or
-    /// hashed: its bytes are not canonical (L3 M6).
+    /// engine's delete routine, Ruling D7), written as `.pptx`. The written bytes must open again
+    /// before they are handed out, so an unreadable file is never written over the last good
+    /// one: an error stops the room's saving instead. The state is never compared or hashed: its
+    /// bytes are not canonical (L3 M6).
     fn save(&self, state: &[u8], name: &str) -> Result<Vec<u8>, String> {
-        log::warn!("live-worker: saving a presentation; the room's state is {} bytes", state.len());
         if !is_pptx(name) {
             return Err(DeckService.refusal(name));
         }
         let deck = deck_from_state(self.live.base(), state).map_err(|e| e.to_string())?;
-        deckcraft_engine::cmd::file::save_bytes(&deck, "pptx").map_err(|e| e.to_string())
+        let bytes = deckcraft_engine::cmd::file::save_bytes(&deck, "pptx").map_err(|e| e.to_string())?;
+        deckcraft_engine::cmd::file::open_presentation(name, &bytes).map_err(|e| format!("the written presentation does not open again: {e}"))?;
+        log::info!("live-worker: {}: presentation written, state {} bytes, file {} bytes", self.room, state.len(), bytes.len());
+        Ok(bytes)
     }
 }
 

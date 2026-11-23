@@ -10,3 +10,4 @@ mod support;
 mod text;
 mod tomb;
 mod undo;
+mod wire;
