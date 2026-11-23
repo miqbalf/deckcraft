@@ -3,10 +3,11 @@
 use craft_collab::yrs::updates::decoder::Decode;
 use craft_collab::yrs::{Any, ClientID, Doc, GetString, OffsetKind, Options, ReadTxn, StateVector, Text, TextRef, Transact, Update};
 use deckcraft_engine::Session;
-use deckcraft_live::text::{TextOp, apply_ops, edit_ops, read_body, write_body};
+use deckcraft_live::text::{Chunk, TextOp, apply_ops, edit_ops, read_body, write_body};
 use deckcraft_model::text::{Align, Bullet, ParaProps, Paragraph, Run, RunKind, RunProps, TextBody};
-use deckcraft_model::{Presentation, edit, walk};
+use deckcraft_model::{Presentation, ShapeKind, edit, walk};
 use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
 
 fn doc_with(client: u64, kind: OffsetKind) -> Doc {
     let mut o = Options::with_client_id(ClientID::new(client));
@@ -60,6 +61,9 @@ fn bodies_of(p: &Presentation, out: &mut Vec<TextBody>) {
         walk(&slide.shapes, &mut |s, _| {
             if let Some(t) = &s.text {
                 out.push(t.clone());
+            }
+            if let ShapeKind::Table(table) = &s.kind {
+                out.extend(table.rows.iter().flat_map(|r| &r.cells).map(|c| c.text.clone()));
             }
         });
     }
@@ -307,7 +311,8 @@ fn arb_body() -> impl Strategy<Value = TextBody> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+    // A fixed seed: the brief asks for seeded random edits, and a red run reproduces.
+    #![proptest_config(ProptestConfig { cases: 96, rng_seed: RngSeed::Fixed(0x1_2026_1122), ..ProptestConfig::default() })]
 
     #[test]
     fn random_bodies_round_trip(body in arb_body()) {
@@ -477,4 +482,123 @@ fn junk_attributes_read_as_defaults() {
         ..Default::default()
     }];
     assert_eq!(got, want);
+}
+
+/// Three bulleted items; `bold` makes the text bold, so the caret's run properties differ from
+/// the paragraphs' end properties.
+fn items(bold: bool) -> TextBody {
+    let props = RunProps { bold: bold.then_some(true), ..Default::default() };
+    TextBody {
+        paragraphs: (1..=3)
+            .map(|i| Paragraph {
+                level: i - 1,
+                props: ParaProps { bullet: Some(Bullet::Char { char: "•".into() }), ..Default::default() },
+                runs: vec![Run::with(format!("Item {i}"), props.clone())],
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// Where Enter goes: (paragraph, char) in the middle, at the end of a paragraph that is not the
+/// last, and at the end of the last one.
+fn enter_positions(body: &TextBody) -> [(&'static str, (usize, usize)); 3] {
+    let end = |p: usize| body.paragraphs[p].char_len();
+    [("middle", (1, 2)), ("end of a non-last paragraph", (1, end(1))), ("end of the last paragraph", (2, end(2)))]
+}
+
+/// The flat position of `(paragraph, char)`: the chars and marks before it.
+fn flat(body: &TextBody, (p, c): (usize, usize)) -> u32 {
+    (body.paragraphs[..p].iter().map(|q| q.char_len() + 1).sum::<usize>() + c) as u32
+}
+
+#[test]
+fn enter_inserts_one_mark_at_the_split_point() {
+    for bold in [false, true] {
+        let before = items(bold);
+        for (name, at) in enter_positions(&before) {
+            let mut after = before.clone();
+            edit::insert(&mut after, at, "\n", None);
+            let ops = edit_ops(&before.paragraphs, &after.paragraphs);
+            let Some((TextOp::Insert { at: got, chunks }, rest)) = ops.split_first() else {
+                panic!("{name}: Enter starts with an insert, got {ops:?}");
+            };
+            assert_eq!(*got, flat(&before, at), "{name}: the new mark goes in at the caret");
+            assert!(matches!(chunks.as_slice(), [Chunk::Text { text, .. }] if text == "\n"), "{name}: one mark: {chunks:?}");
+            // The rest only formats marks already there (the caret's run properties may change
+            // the second half's end properties); nothing is deleted or inserted.
+            assert!(rest.iter().all(|op| matches!(op, TextOp::Format { .. })), "{name}: {ops:?}");
+        }
+    }
+}
+
+#[test]
+fn formatting_a_range_is_only_format_ops() {
+    let before = items(false);
+    let mut after = before.clone();
+    edit::format(&mut after, (0, 2), (2, 3), &|r: &mut RunProps| r.italic = Some(true));
+    let ops = edit_ops(&before.paragraphs, &after.paragraphs);
+    assert!(!ops.is_empty() && ops.iter().all(|op| matches!(op, TextOp::Format { .. })), "{ops:?}");
+}
+
+#[test]
+fn a_demote_racing_enter_converges_and_demotes_the_half_after_the_caret() {
+    // Alice presses Enter while bob demotes the same item: the review's failure scenario (I1),
+    // in every caret position and with either peer's client id lower.
+    let start = items(false);
+    let (seed, _) = seeded(0, OffsetKind::Bytes, &start);
+    let state = update_since(&seed, &StateVector::default());
+    let peer = |client: u64| {
+        let d = doc(client);
+        apply(&d, &state);
+        let t = text_of(&d);
+        (d, t)
+    };
+    for (alice, bob) in [(1, 2), (2, 1)] {
+        for (name, at) in enter_positions(&start) {
+            let (p, c) = at;
+            let (a, ta) = peer(alice);
+            let (b, tb) = peer(bob);
+            let mut split = start.clone();
+            edit::insert(&mut split, at, "\n", None);
+            let ua = edit_to(&a, &ta, &split.paragraphs);
+            let mut demoted = start.clone();
+            demoted.paragraphs[p].level += 1;
+            let ub = edit_to(&b, &tb, &demoted.paragraphs);
+            apply(&a, &ub);
+            apply(&b, &ua);
+            let (o, to) = peer(3);
+            apply(&o, &ub);
+            apply(&o, &ua);
+            let (ra, rb, ro) = (read(&a, &ta), read(&b, &tb), read(&o, &to));
+            assert_eq!(ra, rb, "{name}: both peers read equal");
+            assert_eq!(ra, ro, "{name}: delivery order does not matter");
+            assert_eq!(plain(&ra), plain(&split.paragraphs), "{name}: the text is alice's");
+            assert_eq!(ra.len(), start.paragraphs.len() + 1, "{name}: one more paragraph");
+            let (was, now) = (start.paragraphs[p].level, start.paragraphs[p].level + 1);
+            assert_eq!(ra[p + 1].level, now, "{name}: the half after the caret holds the original mark, so it is demoted");
+            // At a paragraph's end the new mark goes in right before the demoted one and inherits
+            // bob's level as yrs extends his format over it: the result of demote, then Enter. In
+            // the middle the new mark carries its own level and the text before the caret keeps it.
+            let at_end = c == start.paragraphs[p].char_len();
+            assert_eq!(ra[p].level, if at_end { now } else { was }, "{name}: the half before the caret");
+        }
+    }
+}
+
+#[test]
+fn a_lost_final_mark_is_put_back() {
+    let start = items(false);
+    let (d, t) = seeded(1, OffsetKind::Bytes, &start);
+    {
+        let mut txn = d.transact_mut();
+        let n = t.len(&txn);
+        t.remove_range(&mut txn, n - 1, 1);
+    }
+    let mut want = read(&d, &t);
+    want.last_mut().expect("paragraphs").level = 5;
+    edit_to(&d, &t, &want);
+    assert_eq!(read(&d, &t), canon(&want), "the last paragraph takes its level again");
+    assert!(t.get_string(&d.transact()).ends_with('\n'));
 }

@@ -21,6 +21,31 @@
 //! with bytes) with an embed as one; [`apply_ops`] converts with the document's own offset kind,
 //! the same conversion craft-collab's `ydoc.rs` does for WordCraft.
 //!
+//! # Enter and Backspace
+//!
+//! Paragraph fields live on marks, so which paragraph keeps an existing mark decides where a
+//! peer's concurrent paragraph edit (a demote, a bullet) lands. [`edit_ops`] sees only content,
+//! not the caret, and follows one rule:
+//!
+//! * **Enter inserts the new mark at the split point**, carrying the first half's fields. The
+//!   original mark stays with the second half, the paragraph after the caret. This holds in the
+//!   middle of a paragraph, at the end of a paragraph that is not the last, and at the end of the
+//!   last one. The rule cannot be the other way round (the original mark staying with the text):
+//!   at the end of the last paragraph that would need the new mark after the final mark, and the
+//!   final mark is never deleted or moved.
+//! * So a paragraph edit a peer makes at the same time as Enter always reaches the half after the
+//!   caret. At a paragraph's end it reaches the half before too: the new mark sits right before
+//!   the edited one, and yrs extends the peer's format over it, which gives the result of the
+//!   edit followed by Enter. In the middle of a paragraph the new mark carries its own fields and
+//!   the text before the caret keeps them.
+//! * Where the content alone is ambiguous, because the split point sits right after other marks
+//!   (Enter at the start of a paragraph, or in an empty one), the new mark goes where the kept
+//!   marks need the fewest attribute changes, and on a tie in the leftmost place, which is the
+//!   split point of Enter at the end of the paragraph before. Enter at the start of a paragraph
+//!   whose fields equal the previous paragraph's therefore reads as Enter at the end of that one.
+//! * Backspace at the start of a paragraph deletes the earlier mark and formats the surviving one
+//!   (the second paragraph's) with the merged paragraph's fields.
+//!
 //! # Determinism
 //!
 //! [`write_body`] is a pure function of the body: it inserts the plain content first and then
@@ -46,6 +71,8 @@ pub const MARK: char = '\n';
 pub const BREAK: char = '\u{b}';
 /// Mark attribute: the outline level, when it is not 0.
 pub const P_LEVEL: &str = "p.level";
+/// The deepest outline level; a `p.level` above it reads as 0.
+const MAX_LEVEL: u8 = 8;
 /// Mark attribute: the paragraph's [`ParaProps`], when not default.
 pub const P_PROPS: &str = "p.props";
 /// Mark attribute: the paragraph's run defaults (`def_props`), when not default.
@@ -264,7 +291,7 @@ fn read_run_props(attrs: &Attributes) -> RunProps {
 }
 
 fn read_mark(attrs: &Attributes, p: &mut Paragraph) {
-    p.level = attrs.get(P_LEVEL).and_then(|v| parse::<u8>(v, P_LEVEL)).unwrap_or(0);
+    p.level = attrs.get(P_LEVEL).and_then(|v| parse::<u8>(v, P_LEVEL)).filter(|l| *l <= MAX_LEVEL).unwrap_or(0);
     p.props = attrs.get(P_PROPS).and_then(|v| parse(v, P_PROPS)).unwrap_or_default();
     p.def_props = attrs.get(P_DEF).and_then(|v| parse(v, P_DEF)).unwrap_or_default();
     p.end_props = attrs.get(P_END).and_then(|v| parse(v, P_END)).unwrap_or_default();
@@ -381,6 +408,7 @@ fn pos(n: usize) -> u32 {
 /// A minimal edit from `before` to `after`: the content outside their common prefix and suffix
 /// is deleted and inserted, then every unit kept whose attributes differ is formatted. The final
 /// paragraph mark is always kept when both bodies have one, so the edit never asks to delete it.
+/// Enter inserts its mark at the split point (module doc, "Enter and Backspace").
 pub fn edit_ops(before: &[Paragraph], after: &[Paragraph]) -> Vec<TextOp> {
     let a = flatten(before);
     let b = flatten(after);
@@ -388,11 +416,31 @@ pub fn edit_ops(before: &[Paragraph], after: &[Paragraph]) -> Vec<TextOp> {
     let tail = usize::from(!a.is_empty() && !b.is_empty());
     let (ai, bi) = (a.len() - tail, b.len() - tail);
     let (ac, bc) = (a.get(..ai).unwrap_or_default(), b.get(..bi).unwrap_or_default());
-    let prefix = ac.iter().zip(bc).take_while(|(x, y)| x.unit == y.unit).count();
+    let mut prefix = ac.iter().zip(bc).take_while(|(x, y)| x.unit == y.unit).count();
     let room = ai.min(bi) - prefix;
-    let suffix = ac.iter().rev().zip(bc.iter().rev()).take(room).take_while(|(x, y)| x.unit == y.unit).count();
-    let mut ops = Vec::new();
+    let mut suffix = ac.iter().rev().zip(bc.iter().rev()).take(room).take_while(|(x, y)| x.unit == y.unit).count();
     let del = ai - prefix - suffix;
+    // A pure insertion that ends with a paragraph mark, right after other marks, could go in on
+    // either side of each of them: the content is the same. Which side decides which paragraph
+    // keeps an existing mark, and so where a peer's concurrent paragraph edit lands. Pick the
+    // place whose kept marks need the fewest attribute changes; on a tie, the leftmost one, which
+    // is the split point of Enter at the end of a paragraph (module doc, "Enter and Backspace").
+    let len = bi - suffix - prefix;
+    if del == 0 && len > 0 {
+        let mut back = 0;
+        while back < prefix
+            && ac.get(prefix - 1 - back).is_some_and(|x| x.unit == Unit::Mark)
+            && bc.get(bi - suffix - 1 - back).is_some_and(|y| y.unit == Unit::Mark)
+        {
+            back += 1;
+        }
+        let differs = |i: usize, j: usize| a.get(i).map(|x| &x.attrs) != b.get(j).map(|y| &y.attrs);
+        let cost = |p: usize| (prefix - back..prefix).filter(|&i| if i < p { differs(i, i) } else { differs(i, i + len) }).count();
+        let best = (prefix - back..=prefix).min_by_key(|&p| cost(p)).unwrap_or(prefix);
+        suffix += prefix - best;
+        prefix = best;
+    }
+    let mut ops = Vec::new();
     if del > 0 {
         ops.push(TextOp::Delete { at: pos(prefix), len: pos(del) });
     }
@@ -465,8 +513,19 @@ impl Layout {
 }
 
 /// Apply `ops` in order. Positions past the end are clipped to it. A delete never removes the
-/// last paragraph mark: an op that would is clipped around it.
+/// last paragraph mark: an op that would is clipped around it. A non-empty body whose last mark
+/// is missing (only a damaged peer can delete it) first gets a plain mark back at its end, so
+/// the body again reads as [`read_body`] says and its last paragraph can be formatted.
 pub fn apply_ops(txn: &mut TransactionMut, text: &TextRef, ops: &[TextOp]) {
+    if !ops.is_empty() {
+        let lay = Layout::of(txn, text);
+        let n = lay.len();
+        if n > 0 && lay.last_mark != Some(n - 1) {
+            log::warn!("live: a text body had lost its final paragraph mark; put back");
+            let end = lay.offset(n);
+            text.insert_with_attributes(txn, end, &MARK.to_string(), Attrs::new());
+        }
+    }
     for op in ops {
         let lay = Layout::of(txn, text);
         let n = lay.len();
