@@ -163,6 +163,8 @@ impl<H: Hub> DeckLive<H> {
             unmerged: None,
             scene: crate::presence::Scene::default(),
             mine: None,
+            undo: crate::undo::UndoLog::default(),
+            resync_after: false,
         };
         let mut live =
             DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false, closed: false, wall: None };
@@ -180,11 +182,16 @@ impl<H: Hub> DeckLive<H> {
         let q = self.core.queue();
         session.set_edit_observer(self.map.doc, Some(Box::new(move |e: Edited| q.push(DeckEdit::Command(Box::new(e))))));
         let q = self.core.queue();
+        let offer = self.map.undo.offer();
+        // Undo and Redo go through the edit queue to the mapping's own log (Ruling D4), never
+        // craft-live's `history_hook`. The answer says whether my log had a step at the last
+        // flush (D4 review M5); the step itself is taken at the next flush, and the engine
+        // changes when it lands (D4 review M6).
         session.set_live_undo_hook(
             self.map.doc,
             Some(Box::new(move |redo| {
                 q.push(if redo { DeckEdit::Redo } else { DeckEdit::Undo });
-                true
+                offer.has(redo)
             })),
         );
         self.clear_history(session);
@@ -563,6 +570,18 @@ impl<H: Hub> DeckLive<H> {
     /// The commands sent since the last call, one group each however many updates it took.
     pub fn take_sent(&mut self) -> Vec<SentGroup> {
         std::mem::take(&mut self.map.sent)
+    }
+
+    /// Whether Undo has a command of mine to take back (U1 greys Undo from this, D4 review M5).
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        self.map.undo.can_undo()
+    }
+
+    /// Whether Redo has an undone command of mine to bring back.
+    #[must_use]
+    pub fn can_redo(&self) -> bool {
+        self.map.undo.can_redo()
     }
 
     /// Remote changes are waiting for a drag or a composition to end.

@@ -854,6 +854,18 @@ impl DeckTxn<'_> {
         }
     }
 
+    /// Remove a latest-wins key (an undo back to "absent", L6). Never a whole entry: entries are
+    /// only ever tombstoned.
+    pub fn unset(&mut self, key: &KeyRef) {
+        let (target, k) = match key {
+            KeyRef::Slide(id, k) => (Tomb::Slide(*id), k),
+            KeyRef::Shape(id, k) => (Tomb::Shape(*id), k),
+        };
+        if let Some(m) = self.entry(target) {
+            m.remove(&mut self.txn, k);
+        }
+    }
+
     fn entry(&mut self, target: Tomb) -> Option<MapRef> {
         let m = match target {
             Tomb::Slide(id) => Roots::entry(&self.roots.slides, &self.txn, id.0),
