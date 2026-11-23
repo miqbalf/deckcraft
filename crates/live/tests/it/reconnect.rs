@@ -4,7 +4,7 @@
 
 use chrono::NaiveDateTime;
 use craft_live::LiveStatus;
-use deckcraft_live::unmerged_name;
+use deckcraft_live::{Tomb, UNMERGED_TEXT, unmerged_name};
 use deckcraft_model::ShapeId;
 use serde_json::json;
 
@@ -75,6 +75,16 @@ fn a_reset_after_offline_edits_offers_the_unmerged_copy() {
     let t = shape_of(&copy, a).and_then(|s| s.text).map(|t| t.text()).unwrap_or_default();
     assert!(t.contains("kept offline") && t.contains("alpha"), "the copy holds the offline text: {t:?}");
     assert!(r.peers[0].live.take_unmerged().is_none(), "taken once");
+    // The drop itself. A snapshot after local edits cannot be merged into, so craft-live gives
+    // the replica up (C9): A's link ends and A edits no more. (Here the rejoin had resent the
+    // edits before the snapshot came, so the room holds them too; the copy is the safety net for
+    // when it did not.) Reopened, A converges with the room.
+    r.settle();
+    assert!(matches!(r.peers[0].live.status(), LiveStatus::Broken(_)), "{:?}", r.peers[0].live.status());
+    assert!(!r.peers[0].live.editable(), "the given-up replica takes no edits");
+    let again = r.join(&basic());
+    assert!(*r.peers[again].doc() == *r.peers[1].doc(), "the reopened window equals the room");
+    assert!(*r.peers[again].doc() == r.peers[1].rebuilt(), "and the room's replica");
 }
 
 #[test]
@@ -82,4 +92,104 @@ fn unmerged_names_keep_the_stem() {
     let at = NaiveDateTime::parse_from_str("2026-11-22 1404", "%Y-%m-%d %H%M").expect("date");
     assert_eq!(unmerged_name("Deck.pptx", at), "Deck (unmerged 2026-11-22 1404).pptx");
     assert_eq!(unmerged_name("dir/Q3 plan.v2.pptx", at), "Q3 plan.v2 (unmerged 2026-11-22 1404).pptx");
+}
+
+/// Offline text, then the snapshot reset: the edits, as an unmerged copy.
+fn offline_then_reset(r: &mut Room, a: ShapeId, text: &str) {
+    r.drop_link(0);
+    r.pump_all();
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit offline");
+    r.peers[0].run("text.insert", json!({"text": text})).expect("type offline");
+    r.pump_all();
+    r.restore_link(0);
+    r.relay.fall_behind(r.peers[0].live.core().hub());
+    r.pump(0);
+    r.settle();
+}
+
+fn copy_text(bytes: &[u8], a: ShapeId) -> String {
+    let copy = deckcraft_engine::cmd::file::open_presentation(NAME, bytes).expect("the copy opens");
+    shape_of(&copy, a).and_then(|s| s.text).map(|t| t.text()).unwrap_or_default()
+}
+
+/// A copy that waits is told once and kept, whatever hands it over again (craft-live's own
+/// hand-over, then this session's on close): one copy with the offline text.
+#[test]
+fn a_waiting_copy_is_told_and_kept_across_hand_overs() {
+    let mut r = Room::new(basic(), 2, 13);
+    let a = find(&r.peers[0].doc(), "alpha");
+    offline_then_reset(&mut r, a, "first ");
+    let told = |r: &Room| r.peers[0].notices.iter().filter(|n| n.text == UNMERGED_TEXT).count();
+    assert_eq!(told(&r), 1, "told a copy is waiting");
+    r.peers[0].run("file.close", json!({})).ok();
+    r.pump_all();
+    assert_eq!(told(&r), 1, "told once while it waits");
+    let (_, bytes) = r.peers[0].live.take_unmerged().expect("the copy");
+    assert!(copy_text(&bytes, a).contains("first"), "the copy keeps the offline text");
+    assert!(r.peers[0].live.take_unmerged().is_none(), "taken once");
+}
+
+/// Closing the live presentation while edits wait for the link: they are kept as a copy.
+#[test]
+fn closing_while_reconnecting_keeps_the_offline_edits() {
+    let mut r = Room::new(basic(), 2, 14);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.drop_link(0);
+    r.pump_all();
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit offline");
+    r.peers[0].run("text.insert", json!({"text": "unsent "})).expect("type offline");
+    r.peers[0].run("file.close", json!({})).expect("close");
+    let (_, bytes) = r.peers[0].live.take_unmerged().expect("the copy");
+    assert!(copy_text(&bytes, a).contains("unsent"), "the copy holds the unsent text");
+}
+
+/// An offline edit to a shape a peer deletes meanwhile: after the rejoin it is offered back, and
+/// Restore brings it back with the offline text everywhere.
+#[test]
+fn an_offline_edit_to_a_shape_a_peer_deleted_offers_restore() {
+    let mut r = Room::new(basic(), 2, 15);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.drop_link(0);
+    r.pump_all();
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit offline");
+    r.peers[0].run("text.insert", json!({"text": "away "})).expect("type offline");
+    r.peers[0].run("edit.deselect", json!({})).ok();
+    r.peers[1].run("edit.delete", json!({"ids": [a.0]})).expect("delete");
+    r.pump_all();
+    r.restore_link(0);
+    r.settle();
+    r.assert_converged();
+    assert!(r.peers[0].notices.iter().any(|n| n.restore == Some(Tomb::Shape(a))), "offered Restore: {:?}", r.peers[0].notices);
+    let p = &mut r.peers[0];
+    p.live.restore(&mut p.session, Tomb::Shape(a)).expect("restore");
+    r.settle();
+    for i in 0..2 {
+        assert!(text_of(&r, i, a).contains("away"), "peer {i}: back with the offline text");
+    }
+    r.assert_converged();
+}
+
+/// Offline edits past the buffer bound: the gate and Restore say the buffer is full.
+#[test]
+fn a_full_offline_buffer_says_so() {
+    let mut r = Room::new(basic(), 2, 16);
+    let doc = r.peers[0].doc();
+    let (a, g) = (find(&doc, "alpha"), find(&doc, "gamma"));
+    r.peers[1].run("edit.delete", json!({"ids": [g.0]})).expect("delete");
+    r.settle();
+    r.drop_link(0);
+    r.pump_all();
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit offline");
+    let big = "x".repeat(400_000);
+    for _ in 0..8 {
+        if !r.peers[0].live.editable() {
+            break;
+        }
+        r.peers[0].run("text.insert", json!({"text": big})).expect("type offline");
+    }
+    assert_eq!(r.peers[0].live.allows("shape.move"), Err(craft_live::BUFFER_FULL), "the gate names the full buffer");
+    let p = &mut r.peers[0];
+    let refused = p.live.restore(&mut p.session, Tomb::Shape(g)).expect_err("restore waits too");
+    assert_eq!(refused, craft_live::BUFFER_FULL);
+    assert!(p.live.replica().is_some_and(|d| d.shape(g).is_some_and(|e| e.del)), "nothing was written");
 }

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use deckcraft_engine::Edited;
 use deckcraft_model::text::Paragraph;
-use deckcraft_model::{Shape, ShapeId, Slide, SlideId};
+use deckcraft_model::{Presentation, Shape, ShapeId, Slide, SlideId};
 
 use crate::doc::{DeckDoc, TextTarget, Tomb, shape_values, slide_values};
 use crate::order::between;
@@ -52,7 +52,7 @@ pub(crate) fn plan(doc: &DeckDoc, e: &Edited, space: u32, uid: &str) -> Planned 
                     out.slides.insert(s.id);
                 }
                 if !Arc::ptr_eq(b, s) {
-                    changed_slide(&mut out, doc, b, s, space, uid);
+                    changed_slide(&mut out, doc, before, b, s, space, uid);
                 }
             }
         }
@@ -65,7 +65,7 @@ pub(crate) fn plan(doc: &DeckDoc, e: &Edited, space: u32, uid: &str) -> Planned 
     out
 }
 
-fn changed_slide(out: &mut Planned, doc: &DeckDoc, b: &Slide, a: &Slide, space: u32, uid: &str) {
+fn changed_slide(out: &mut Planned, doc: &DeckDoc, deck: &Presentation, b: &Slide, a: &Slide, space: u32, uid: &str) {
     let id = a.id;
     let mut touched = false;
     let (vb, va) = (slide_values(b), slide_values(a));
@@ -88,7 +88,7 @@ fn changed_slide(out: &mut Planned, doc: &DeckDoc, b: &Slide, a: &Slide, space: 
         touched = true;
     }
     if b.shapes != a.shapes {
-        shapes(out, doc, id, b, a, space, uid);
+        shapes(out, doc, deck, b, a, space, uid);
         touched = true;
     }
     if touched || b.has_notes_slide != a.has_notes_slide {
@@ -112,8 +112,17 @@ fn flat(shapes: &[Shape]) -> HashMap<ShapeId, (&Shape, Option<ShapeId>)> {
     out
 }
 
-fn shapes(out: &mut Planned, doc: &DeckDoc, slide: SlideId, b: &Slide, a: &Slide, space: u32, uid: &str) {
+fn shapes(out: &mut Planned, doc: &DeckDoc, deck: &Presentation, b: &Slide, a: &Slide, space: u32, uid: &str) {
+    let slide = a.id;
     let (fb, fa) = (flat(&b.shapes), flat(&a.shapes));
+    // The removed shapes whose parent stays: the tombstones this edit writes.
+    let removed: Vec<ShapeId> =
+        fb.iter().filter(|(id, (_, parent))| !fa.contains_key(*id) && !parent.is_some_and(|p| !fa.contains_key(&p))).map(|(id, _)| *id).collect();
+    // What the engine's delete routine makes of the other shapes (connector ends loosened, groups
+    // refitted). The rebuild derives it from the tombstones on every peer (Ruling D7), so it is
+    // not written: a Restore then brings the shapes back as they were (L5 review M1).
+    let derived = derived_slide(deck, slide, &removed);
+    let derived = derived.as_ref().map(|s| flat(&s.shapes));
     // Each sibling list in `after`, in order: new and moved shapes get `z` keys.
     let mut lists: Vec<(Option<ShapeId>, &[Shape])> = vec![(None, &a.shapes)];
     let mut i = 0;
@@ -142,7 +151,8 @@ fn shapes(out: &mut Planned, doc: &DeckDoc, slide: SlideId, b: &Slide, a: &Slide
                     if let Some(z) = keys.get(&s.id) {
                         out.writes.push(PlannedWrite::SetShape { id: s.id, key: crate::schema::Z.to_owned(), value: z.clone().into() });
                     }
-                    if !std::ptr::eq(*sb, s) {
+                    let routine = derived.as_ref().and_then(|d| d.get(&s.id)).is_some_and(|(d, _)| *d == s && *sb != s);
+                    if !std::ptr::eq(*sb, s) && !routine {
                         changed_shape(out, doc, sb, s);
                     }
                 }
@@ -150,11 +160,23 @@ fn shapes(out: &mut Planned, doc: &DeckDoc, slide: SlideId, b: &Slide, a: &Slide
         }
     }
     // Removed shapes: a tombstone for each whose parent did not go too.
-    for (id, (_, parent)) in &fb {
-        if !fa.contains_key(id) && !parent.is_some_and(|p| !fa.contains_key(&p)) {
-            out.writes.push(PlannedWrite::Del { target: Tomb::Shape(*id), del: true, by: uid.to_owned() });
-        }
+    let mut removed = removed;
+    removed.sort();
+    for id in removed {
+        out.writes.push(PlannedWrite::Del { target: Tomb::Shape(id), del: true, by: uid.to_owned() });
     }
+}
+
+/// Slide `slide` of `deck` after the engine's delete routine removed `removed`; None when nothing
+/// is removed.
+fn derived_slide(deck: &Presentation, slide: SlideId, removed: &[ShapeId]) -> Option<Slide> {
+    if removed.is_empty() {
+        return None;
+    }
+    let i = deck.slides.iter().position(|s| s.id == slide)?;
+    let mut p = deck.clone();
+    deckcraft_engine::delete_shapes_in(&mut p, i, removed);
+    p.slides.get(i).map(|s| (**s).clone())
 }
 
 fn changed_shape(out: &mut Planned, doc: &DeckDoc, b: &Shape, a: &Shape) {

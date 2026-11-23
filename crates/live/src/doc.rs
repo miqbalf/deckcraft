@@ -944,11 +944,11 @@ fn read_bool<T: ReadTxn>(m: &MapRef, txn: &T, key: &str) -> Read<bool> {
     }
 }
 
-/// `del`; a junk value reads as deleted when the entry names a deleter (`delBy` is written with
-/// every delete and removed by every restore), so a peer's junk cannot revive a tombstone (L3
-/// review), and as live otherwise.
+/// `del`; a junk or removed value reads as deleted when the entry names a deleter (`delBy` is
+/// written with every delete and removed by every restore), so a peer's junk or a removed key
+/// cannot revive a tombstone (L3 review, L5 review M5), and as live otherwise.
 fn read_del<T: ReadTxn>(m: &MapRef, txn: &T, by: bool, bad: &mut BTreeSet<&'static str>) -> bool {
-    read_bool(m, txn, DEL).or(DEL, false, by, bad)
+    read_bool(m, txn, DEL).or(DEL, by, by, bad)
 }
 
 fn read_by<T: ReadTxn>(m: &MapRef, txn: &T) -> Read<Option<String>> {

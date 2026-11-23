@@ -16,7 +16,7 @@ use crate::local::plan;
 use crate::net::unshared;
 use crate::remote::{Targets, land, whole};
 use crate::schema::{id_key, parse_key};
-use crate::session::Notice;
+use crate::session::{Notice, UNMERGED_TEXT};
 use crate::split::{PlannedWrite, plan_split};
 use crate::tomb::{Tombs, inside, line_for, restore_writes, slide_of, slide_tomb, tomb_over, tombstoned};
 use crate::unmerged::Unmerged;
@@ -93,6 +93,27 @@ pub(crate) struct Mapping {
     pub tombs: Tombs,
     /// Local edits craft-live was about to drop, for [`crate::DeckLive::take_unmerged`].
     pub unmerged: Option<Unmerged>,
+}
+
+impl Mapping {
+    /// Keep `state` (a replica's state with local edits the room lacks) for the unmerged copy.
+    /// A copy still waiting is merged with it, never replaced: after a reset the replica no longer
+    /// holds the earlier edits (L5 review I1). The person is told when a copy starts waiting.
+    pub(crate) fn keep_unmerged(&mut self, state: Vec<u8>) {
+        match self.unmerged.as_mut() {
+            Some(u) => u.states.push(state),
+            None => {
+                self.unmerged = Some(Unmerged { states: vec![state], at: None });
+                self.notices.push(Notice { text: UNMERGED_TEXT.to_owned(), restore: None });
+            }
+        }
+    }
+}
+
+/// Every tombstone `doc` holds.
+fn tombs_in(doc: &DeckDoc) -> BTreeSet<Tomb> {
+    let slides = doc.slide_entries().iter().filter(|(_, e)| e.del).map(|(id, _)| Tomb::Slide(*id));
+    slides.chain(doc.shape_entries().iter().filter(|(_, e)| e.del).map(|(id, _)| Tomb::Shape(*id))).collect()
 }
 
 /// The engine session and the mapping, for one call.
@@ -245,8 +266,12 @@ impl DeckApp<'_> {
                 Err(e) => {
                     log::warn!("deckcraft-live: a restore was refused: {}", e.error);
                     // Whatever was written goes out; the engine is rebuilt from the replica.
-                    let Some(u) = e.update else { return Err(LocalError::Failed(e.error.to_string())) };
-                    updates.push(u);
+                    // As for a command: earlier updates of this batch went out, so this is partial.
+                    match e.update {
+                        Some(u) => updates.push(u),
+                        None if updates.is_empty() => return Err(LocalError::Failed(e.error.to_string())),
+                        None => {}
+                    }
                     self.map.partial = true;
                     return Ok(());
                 }
@@ -309,6 +334,8 @@ impl LiveApp<Deck> for DeckApp<'_> {
         // A drop on a shape a peer deleted is refused with the deleter's name (Ruling D6); typed
         // text still lands in the tombstone (spec "delete beats edit").
         for (c, p) in ours.iter().zip(&plans) {
+            // The engine labels a pointer gesture's report `pointer:<label>` (`Edited::command`);
+            // only a drop is refused here, typing into a tombstone lands in it.
             if !c.command.starts_with("pointer:") {
                 continue;
             }
@@ -449,6 +476,10 @@ impl LiveApp<Deck> for DeckApp<'_> {
             self.start_hold();
             return Ok(());
         }
+        if std::mem::take(&mut self.map.tombs.reseed) {
+            // After a reset: the tombstones the room's document holds are known, not news.
+            self.map.tombs.dead = tombs_in(replica);
+        }
         let p = whole(&self.map.base, replica, self.map.block.as_ref());
         self.install(p)?;
         if !self.map.resync_wanted {
@@ -458,10 +489,14 @@ impl LiveApp<Deck> for DeckApp<'_> {
     }
 
     fn reset(&mut self, space: u32) {
-        // The replica was replaced: what it holds now is the room's, nothing to tell about.
+        // The replica was replaced: what it holds now is the room's, nothing to tell about. My
+        // groups before it are gone from it too (L5 review M6); the resync that follows reads
+        // the room's tombstones as known.
         self.map.tombs.dead.clear();
         self.map.tombs.told.clear();
         self.map.tombs.pending.clear();
+        self.map.tombs.recent.clear();
+        self.map.tombs.reseed = true;
         self.map.held = Targets::default();
         self.map.held_since = None;
         self.map.touched = Targets::default();
@@ -512,8 +547,7 @@ impl LiveApp<Deck> for DeckApp<'_> {
 
     fn unmerged(&mut self, state: &[u8], edits: usize) {
         log::warn!("deckcraft-live: {edits} local edits the room does not have are kept as an unmerged copy");
-        // A later hand-over holds at least what an earlier one did.
-        self.map.unmerged = Some(Unmerged { state: state.to_vec(), at: None });
+        self.map.keep_unmerged(state.to_vec());
     }
 
     fn follow(&self, carets: &mut HashMap<String, DeckCaret>) {

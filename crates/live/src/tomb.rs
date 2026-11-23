@@ -54,6 +54,8 @@ pub(crate) struct Tombs {
     pub names: HashMap<String, String>,
     /// Deletes to tell the person about, with the deleter's uid; named after the pump.
     pub pending: Vec<(Tomb, String)>,
+    /// A reset replaced the replica: the next resync reads its tombstones as known.
+    pub reseed: bool,
 }
 
 impl Tombs {
