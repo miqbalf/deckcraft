@@ -2,6 +2,7 @@
 mod doc;
 mod free;
 mod gate;
+mod hold;
 mod order;
 mod support;
 mod text;

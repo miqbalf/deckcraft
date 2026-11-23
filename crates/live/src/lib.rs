@@ -23,12 +23,12 @@ pub mod session;
 pub mod split;
 pub mod text;
 
-pub use app::{EDIT_TOO_LARGE_TEXT, SentGroup};
+pub use app::{EDIT_TOO_LARGE_TEXT, FRAME, SentGroup, WIRE_LIMIT};
 pub use build::{deck_from_doc, deck_from_state};
 pub use doc::{DeckChange, DeckDoc, DeckSeed, DeckTxn, KeyRef, ShapeEntry, SlideEntry, TextTarget, Tomb, WriteError};
 pub use gate::{MEDIA_TEXT, NOT_YET_TEXT};
 pub use kind::{CaretPos, Deck, DeckCaret, DeckEdit, DeckPos};
-pub use net::{COPY_UNSHARED_TEXT, unshared};
+pub use net::{COPY_UNSHARED_TEXT, SECTIONS_TEXT, unshared};
 pub use schema::{MAX_SEED_BYTES, UPDATE_BUDGET, schema};
-pub use session::{BaseFile, DeckLive, LiveFail, NO_SPACE_TEXT, Notice, PAUSED_TEXT, Peer, READ_ONLY_TEXT, TOO_LARGE_TEXT};
+pub use session::{BaseFile, CLOSED_TEXT, DeckLive, LiveFail, NO_SPACE_TEXT, Notice, PAUSED_TEXT, Peer, READ_ONLY_TEXT, TOO_LARGE_TEXT};
 pub use split::{PlannedWrite, plan_split};

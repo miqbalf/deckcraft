@@ -7,7 +7,7 @@ use craft_live::Access;
 use craft_live::testing::{MemRelay, ROOM};
 use deckcraft_engine::Session;
 use deckcraft_live::gate::{MEDIA, NOT_YET, tables, tables_holding};
-use deckcraft_live::{BaseFile, COPY_UNSHARED_TEXT, DeckLive, LiveFail, NOT_YET_TEXT};
+use deckcraft_live::{BaseFile, CLOSED_TEXT, COPY_UNSHARED_TEXT, DeckLive, LiveFail, NOT_YET_TEXT, SECTIONS_TEXT};
 use serde_json::json;
 
 use crate::support::{NAME, Room, add_box, basic, deck_bytes, find, shape_of};
@@ -120,4 +120,88 @@ fn too_large_opens_alone() {
     assert!(matches!(got, Err(LiveFail::TooLarge)), "over the limit, no live session");
     assert!(session.documents().len() == 1, "the file is open for this person alone");
     assert!(relay.seq() == 0, "nothing was sent");
+}
+
+#[test]
+fn minting_before_a_space_is_granted_is_refused() {
+    let bytes = basic();
+    let relay = MemRelay::new();
+    let hub = relay.connect("user0", "User 0", true);
+    let mut session = Session::new();
+    let base = BaseFile { bytes: &bytes, name: NAME, expected_sha256: None };
+    let mut live = DeckLive::start(hub, ROOM, &base, Access::Edit, "user0", &mut session).expect("start");
+    let doc = |s: &Session| s.active().expect("doc").doc.clone();
+    let before = doc(&session);
+    let seq = relay.seq();
+    // Not joined yet: the gate says so, and the engine itself mints nothing.
+    assert!(live.run(&mut session, "shape.insert", &json!({"preset": "rect"})) == Err(craft_live::CONNECTING.to_owned()), "the gate waits");
+    let direct = session.execute("shape.insert", &json!({"preset": "rect"}));
+    assert!(direct.is_err(), "no id is minted before the grant");
+    assert!(Arc::ptr_eq(&doc(&session), &before), "the deck is unchanged");
+    live.pump(&mut session);
+    assert!(relay.seq() == seq, "nothing was sent");
+    // Once joined, the same command mints from the granted space.
+    for _ in 0..3 {
+        live.pump(&mut session);
+    }
+    assert!(live.run(&mut session, "shape.insert", &json!({"preset": "rect"})).is_ok(), "after the grant it runs");
+    assert!(relay.seq() > seq, "and is shared");
+}
+
+#[test]
+fn deleting_an_animated_shape_passes_the_net() {
+    let bytes = deck_bytes(|s| {
+        add_box(s, "moving", [60.0, 60.0, 200.0, 80.0]);
+        add_box(s, "trigger", [320.0, 60.0, 200.0, 80.0]);
+        let doc = s.active().expect("doc").doc.clone();
+        let (m, t) = (find(&doc, "moving"), find(&doc, "trigger"));
+        s.execute("animation.add", &json!({"effect": "fade", "ids": [m.0]})).expect("animate");
+        s.execute("animation.add", &json!({"effect": "spin", "ids": [t.0]})).expect("animate");
+        s.execute("animation.timing", &json!({"index": 0, "trigger": t.0})).expect("triggered");
+    });
+    let mut r = Room::new(bytes, 2, 25);
+    let doc = r.peers[0].doc();
+    let (m, t) = (find(&doc, "moving"), find(&doc, "trigger"));
+    let n = doc.slides[0].animations.len();
+    r.peers[0].run("edit.delete", json!({"ids": [t.0]})).expect("the delete is shared");
+    r.settle();
+    for (i, p) in r.peers.iter().enumerate() {
+        let s = &p.doc().slides[0];
+        assert!(s.shape(t).is_none(), "peer {i}: the shape is gone");
+        assert!(s.animations.len() < n, "peer {i}: its animation went with it");
+        assert!(s.animations.iter().all(|a| a.shape != t && a.trigger != Some(t)), "peer {i}: nothing names it");
+        assert!(s.animations.iter().any(|a| a.shape == m), "peer {i}: the other shape keeps its animation");
+    }
+    r.assert_converged();
+}
+
+#[test]
+fn slide_moves_in_a_deck_with_sections_say_why() {
+    let bytes = deck_bytes(|s| {
+        s.execute("slide.new", &json!({})).expect("slide");
+        s.execute("section.add", &json!({"name": "Part", "at": 1})).expect("section");
+    });
+    let mut r = Room::new(bytes, 2, 26);
+    assert!(!r.peers[0].doc().sections.is_empty(), "the base has sections");
+    let before = r.peers[0].doc();
+    let got = r.peers[0].run("slide.move", json!({"from": 0, "to": 1}));
+    assert!(got == Err(SECTIONS_TEXT.to_owned()), "refused with the reason: {got:?}");
+    assert!(*r.peers[0].doc() == *before, "the deck is put back");
+}
+
+#[test]
+fn closing_the_live_presentation_ends_the_session() {
+    let mut r = Room::new(basic(), 2, 27);
+    r.peers[0].run("file.close", json!({})).expect("close");
+    assert!(r.peers[0].session.documents().is_empty(), "the presentation is closed");
+    assert!(!r.peers[0].live.editable(), "the link is over");
+    assert!(r.peers[0].run("shape.insert", json!({})) == Err(CLOSED_TEXT.to_owned()), "nothing runs after it");
+    let seq = r.relay.seq();
+    for _ in 0..3 {
+        r.pump_all();
+    }
+    assert!(r.relay.seq() == seq, "nothing more is sent");
+    // The others carry on.
+    let a = find(&r.peers[1].doc(), "alpha");
+    r.peers[1].run("shape.move", json!({"ids": [a.0], "dx": 10.0})).expect("the other peer still edits");
 }

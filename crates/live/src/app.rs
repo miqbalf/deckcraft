@@ -19,8 +19,26 @@ use crate::schema::{id_key, parse_key};
 use crate::session::Notice;
 use crate::split::plan_split;
 
-/// The relay's frame: no update may pass it once encoded.
-pub(crate) const FRAME: usize = 1024 * 1024;
+/// The frame one update may fill on the wire (base64 inside its submit), whatever larger cap
+/// a relay advertises (L3 review M5). craft-live does not expose the relay's own cap at this pin;
+/// the relay's default is twice this.
+pub const FRAME: usize = 1024 * 1024;
+
+/// What the gate lets one part of a command fill: the frame less a margin.
+pub const WIRE_LIMIT: usize = FRAME - FRAME / 16;
+
+/// The submit's JSON around the base64 of one update.
+const ENVELOPE: usize = 256;
+
+/// An update of at most `raw` bytes, as the relay measures it: base64 in its submit.
+pub(crate) fn wire_bound(raw: usize) -> usize {
+    raw.div_ceil(3) * 4 + ENVELOPE
+}
+
+/// The bytes the relay measures for `update` (what craft-collab checks against the relay's cap).
+fn wire_of(update: &[u8]) -> usize {
+    serde_json::to_vec(&craft_collab::TextPayload::new(update)).map_or(usize::MAX, |v| v.len())
+}
 
 /// Why a single change too large for one update is refused (L3 review M5).
 pub const EDIT_TOO_LARGE_TEXT: &str = "This change is too large to share while editing live";
@@ -35,6 +53,10 @@ pub struct SentGroup {
     pub slides: Vec<SlideId>,
     pub shapes: Vec<ShapeId>,
     pub updates: usize,
+    /// The largest of its updates on the wire.
+    pub wire: usize,
+    /// The gate's bound for its largest part, which `wire` never passes.
+    pub bound: usize,
 }
 
 /// What the mapping keeps between calls.
@@ -48,8 +70,11 @@ pub(crate) struct Mapping {
     pub block: Option<IdBlock>,
     /// Remote changes waiting while a drag or a composition is open (Ruling D6).
     pub held: Targets,
-    /// When the hold began (clock ms, or pumps without a clock).
+    /// When the hold began, or the gesture holding it last moved (clock ms, or pumps without a
+    /// clock).
     pub held_since: Option<f64>,
+    /// The engine document's revision at the last pump, to see a gesture still moving.
+    pub seen_revision: u64,
     /// A full rebuild could not land while busy: do it once free.
     pub resync_wanted: bool,
     /// The slides the last batch touched, rebuilt from the replica once it landed.
@@ -73,7 +98,7 @@ pub(crate) struct DeckApp<'a> {
 impl DeckApp<'_> {
     /// Put `p` in place quietly, with this peer's block; a busy engine makes it wait.
     fn install(&mut self, mut p: Presentation) -> Result<(), String> {
-        p.id_block = self.map.block.clone();
+        p.id_block = Some(self.map.block.clone().unwrap_or_default());
         match self.session.replace_presentation_quiet(self.map.doc, p) {
             Ok(()) => {
                 self.map.resync_wanted = false;
@@ -81,9 +106,16 @@ impl DeckApp<'_> {
             }
             Err(EngineError::RemoteBusy) => {
                 self.map.resync_wanted = true;
+                self.start_hold();
                 Ok(())
             }
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn start_hold(&mut self) {
+        if self.map.held_since.is_none() {
+            self.map.held_since = Some(self.now);
         }
     }
 
@@ -112,18 +144,14 @@ impl DeckApp<'_> {
 
     fn hold(&mut self, t: Targets) {
         self.map.held = t;
-        if self.map.held_since.is_none() {
-            self.map.held_since = Some(self.now);
-        }
+        self.start_hold();
     }
 
     /// What was held for a drag or a composition, once it ended; call after each pump.
     pub(crate) fn retry(&mut self, replica: Option<&DeckDoc>) -> Result<(), String> {
         let Some(replica) = replica else { return Ok(()) };
-        if self.map.resync_wanted && !self.session.remote_busy(self.map.doc) {
-            return self.resync(replica);
-        }
         if self.map.resync_wanted {
+            // `resync` waits again, without building anything, while the engine is busy.
             return self.resync(replica);
         }
         // The slides the last local edits touched, as the replica has them (text runs merged,
@@ -145,17 +173,18 @@ impl LiveApp<Deck> for DeckApp<'_> {
         let m = &mut *self.map;
         let ours: Vec<&deckcraft_engine::Edited> =
             edits.iter().filter_map(|e| if let DeckEdit::Command(c) = e { Some(c.as_ref()) } else { None }).filter(|c| c.doc == m.doc).collect();
-        // The safety net first, over the whole batch: nothing is written unless all of it is shared.
+        if !ours.is_empty() && m.block.is_none() {
+            // No id may be minted before a space is granted (D2 review Minor 2); checked before
+            // the safety net, so the reason is the connection, not the minted id.
+            m.refused = Some(craft_live::CONNECTING.to_owned());
+            return Err(LocalError::Refused(craft_live::CONNECTING.to_owned()));
+        }
+        // The safety net, over the whole batch: nothing is written unless all of it is shared.
         for c in &ours {
             if let Some(why) = unshared(&c.before, &c.after) {
                 m.refused = Some(why.to_owned());
                 return Err(LocalError::Refused(why.to_owned()));
             }
-        }
-        if !ours.is_empty() && m.block.is_none() {
-            // No id may be minted before a space is granted (D2 review Minor 2).
-            m.refused = Some(craft_live::CONNECTING.to_owned());
-            return Err(LocalError::Refused(craft_live::CONNECTING.to_owned()));
         }
         for e in edits {
             if matches!(e, DeckEdit::Undo | DeckEdit::Redo) {
@@ -165,15 +194,19 @@ impl LiveApp<Deck> for DeckApp<'_> {
         }
         let plans: Vec<_> = ours.iter().map(|c| plan(replica, c, m.space, &m.uid)).collect();
         let parts: Vec<Vec<Vec<crate::split::PlannedWrite>>> = plans.iter().map(|p| plan_split(&p.writes)).collect();
-        // One entry's writes past what one frame holds would be refused by the relay after this
-        // replica kept them: refuse the command before anything is written (L3 review M5). The
-        // estimate counts twice the content's JSON.
-        if parts.iter().flatten().any(|part| part.iter().map(crate::split::PlannedWrite::size).sum::<usize>() > 2 * FRAME) {
+        // A part past the frame would be refused by the relay after this replica kept it, which
+        // breaks the link: refuse the command before anything is written (L3 review M5). Each
+        // part's size is an upper bound of its updates, measured as the relay measures them.
+        let bounds: Vec<usize> = parts
+            .iter()
+            .map(|ps| ps.iter().map(|part| wire_bound(part.iter().map(crate::split::PlannedWrite::size).sum())).max().unwrap_or(0))
+            .collect();
+        if bounds.iter().any(|b| *b > WIRE_LIMIT) {
             m.refused = Some(EDIT_TOO_LARGE_TEXT.to_owned());
             return Err(LocalError::Refused(EDIT_TOO_LARGE_TEXT.to_owned()));
         }
         let mut updates = Vec::new();
-        for (p, parts) in plans.iter().zip(parts) {
+        for ((p, parts), bound) in plans.iter().zip(parts).zip(bounds) {
             if p.writes.is_empty() {
                 m.touched.whole.extend(p.slides.iter().copied());
                 continue;
@@ -208,11 +241,6 @@ impl LiveApp<Deck> for DeckApp<'_> {
                     }
                 }
             }
-            for u in updates.iter().skip(before) {
-                if u.len() > FRAME {
-                    log::warn!("deckcraft-live: an update of {} bytes is over the relay's frame", u.len());
-                }
-            }
             let mut shapes = BTreeSet::new();
             for w in &p.writes {
                 match w {
@@ -235,6 +263,8 @@ impl LiveApp<Deck> for DeckApp<'_> {
                 slides: p.slides.iter().copied().collect(),
                 shapes: shapes.into_iter().collect(),
                 updates: updates.len() - before,
+                wire: updates.iter().skip(before).map(|u| wire_of(u)).max().unwrap_or(0),
+                bound,
             });
             m.touched.whole.extend(p.slides.iter().copied());
         }
@@ -264,11 +294,22 @@ impl LiveApp<Deck> for DeckApp<'_> {
     }
 
     fn resync(&mut self, replica: &DeckDoc) -> Result<(), String> {
+        // The whole deck replaces what was held and touched.
         self.map.held = Targets::default();
-        self.map.held_since = None;
         self.map.touched = Targets::default();
+        if self.session.remote_busy(self.map.doc) {
+            // Wait for the gesture without rebuilding every frame; the hold's clock keeps
+            // running, so a stale twist is still ended.
+            self.map.resync_wanted = true;
+            self.start_hold();
+            return Ok(());
+        }
         let p = whole(&self.map.base, replica, self.map.block.as_ref());
-        self.install(p)
+        self.install(p)?;
+        if !self.map.resync_wanted {
+            self.map.held_since = None;
+        }
+        Ok(())
     }
 
     fn reset(&mut self, space: u32) {
@@ -284,9 +325,10 @@ impl LiveApp<Deck> for DeckApp<'_> {
             return;
         }
         m.space = space;
-        // A new space starts a new block; the old block's ids stay taken (Ruling D5).
+        // A new space starts a new block; the old block's ids stay taken (Ruling D5). Until a
+        // valid space comes, the engine holds an empty block, which mints nothing.
         m.block = IdBlock::new(space);
-        let block = m.block.clone();
+        let block = Some(m.block.clone().unwrap_or_default());
         if let Some(st) = self.session.document_mut(m.doc) {
             // Allocation state, not content: decks compare equal whatever block they hold.
             Arc::make_mut(&mut st.doc).id_block = block;

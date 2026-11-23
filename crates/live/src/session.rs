@@ -27,6 +27,8 @@ pub const NO_SPACE_TEXT: &str = "Reopen the file to keep adding shapes";
 pub const TOO_LARGE_TEXT: &str = "This presentation is too large to edit live. It is open for you alone.";
 /// Why a shared command is not taken now: the link is not live, or the ticket is read-only.
 pub const PAUSED_TEXT: &str = "Editing is paused until the link to the other editors is back";
+/// Why the link ended: the live presentation was closed here.
+pub const CLOSED_TEXT: &str = "The live presentation was closed";
 /// Why nothing can be edited with a read-only ticket.
 pub const READ_ONLY_TEXT: &str = "This file is read-only for you.";
 
@@ -85,6 +87,8 @@ pub struct DeckLive<H: Hub> {
     clock: Arc<Mutex<Option<Clock>>>,
     pumps: f64,
     resync_told: bool,
+    /// The live presentation was closed here: the session is over.
+    closed: bool,
 }
 
 impl<H: Hub> DeckLive<H> {
@@ -115,6 +119,11 @@ impl<H: Hub> DeckLive<H> {
             return Err(LiveFail::TooLarge);
         }
         let doc = session.documents().get(i).map(|d| d.uid).ok_or_else(|| LiveFail::Open("the presentation did not open".into()))?;
+        if let Some(st) = session.document_mut(doc) {
+            // An empty block until the relay grants a space: the engine mints no id from it, so
+            // nothing made before the grant can clash with a peer's ids (D2 review Minor 2).
+            Arc::make_mut(&mut st.doc).id_block = Some(deckcraft_model::IdBlock::default());
+        }
         let core = match LiveEditing::<H, Deck>::start(hub, room, &seed, access) {
             Ok(c) => c,
             Err(e) => {
@@ -130,6 +139,7 @@ impl<H: Hub> DeckLive<H> {
             block: None,
             held: Targets::default(),
             held_since: None,
+            seen_revision: 0,
             resync_wanted: false,
             touched: Targets::default(),
             partial: false,
@@ -137,7 +147,7 @@ impl<H: Hub> DeckLive<H> {
             notices: Vec::new(),
             sent: Vec::new(),
         };
-        let mut live = DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false };
+        let mut live = DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false, closed: false };
         if live.clock.lock().unwrap_or_else(PoisonError::into_inner).is_some() {
             live.share_clock();
         }
@@ -194,6 +204,9 @@ impl<H: Hub> DeckLive<H> {
     /// One frame: shares the local edits, takes in the other editors' edits and carets, lands
     /// what a drag or a composition held, and says who else is here.
     pub fn pump(&mut self, session: &mut Session) -> Vec<Peer> {
+        if self.closed {
+            return Vec::new();
+        }
         self.pumps += 1.0;
         let now = self.now();
         self.end_stale_twist(session, now);
@@ -226,24 +239,34 @@ impl<H: Hub> DeckLive<H> {
     }
 
     /// A remote change held past its budget by a twist whose `gesture: end` never came: end the
-    /// twist (D4 review M3). A drag or a composition the person is in is left alone.
+    /// twist (D4 review M3). The budget counts from the hold or from the gesture's last step, so
+    /// a twist still turning is never cut; a drag or a composition the person is in is left
+    /// alone. The person's active document stays the active one.
     fn end_stale_twist(&mut self, session: &mut Session, now: f64) {
+        let Some(st) = session.documents().iter().find(|d| d.uid == self.map.doc) else { return };
+        let (revision, twist) = (st.revision, st.interaction.as_ref().is_some_and(|i| i.label == deckcraft_engine::tools::TWIST));
+        let moved = std::mem::replace(&mut self.map.seen_revision, revision) != revision;
         let Some(since) = self.map.held_since else { return };
-        if now - since < self.budget() || session.tool.dragging() {
+        if moved {
+            self.map.held_since = Some(now);
             return;
         }
-        let twist = session
-            .documents()
-            .iter()
-            .find(|d| d.uid == self.map.doc)
-            .and_then(|d| d.interaction.as_ref())
-            .is_some_and(|i| i.label == deckcraft_engine::tools::TWIST);
-        if twist && self.activate(session).is_ok() {
-            if let Err(e) = session.execute("shape.rotate", &json!({"gesture": "end"})) {
-                log::warn!("deckcraft-live: ending a stale twist failed: {e}");
-            }
-            self.map.held_since = Some(now);
+        if now - since < self.budget() || session.tool.dragging() || !twist {
+            return;
         }
+        let was = session.active_index();
+        if self.activate(session).is_err() {
+            return;
+        }
+        if let Err(e) = session.execute("shape.rotate", &json!({"gesture": "end"})) {
+            log::warn!("deckcraft-live: ending a stale twist failed: {e}");
+        }
+        if let Some(i) = was
+            && session.active_index() != Some(i)
+        {
+            session.set_active(i);
+        }
+        self.map.held_since = Some(now);
     }
 
     fn flush(&mut self, session: &mut Session) {
@@ -262,6 +285,9 @@ impl<H: Hub> DeckLive<H> {
     /// # Errors
     /// The refusal or the command's own error, as text for the person.
     pub fn run(&mut self, session: &mut Session, id: &str, params: &Value) -> Result<Value, String> {
+        if self.closed {
+            return Err(CLOSED_TEXT.to_owned());
+        }
         match class(id) {
             Class::NotYet => return Err(NOT_YET_TEXT.to_owned()),
             Class::Media => return Err(MEDIA_TEXT.to_owned()),
@@ -269,6 +295,13 @@ impl<H: Hub> DeckLive<H> {
             Class::Free | Class::History | Class::Local => {}
         }
         self.activate(session)?;
+        if id == "file.close" {
+            // Closing the live presentation ends the session first, as `stop` does.
+            self.detach(session);
+            self.core.end(CLOSED_TEXT);
+            self.closed = true;
+            return session.execute(id, params).map_err(|e| e.to_string());
+        }
         self.map.refused = None;
         let done = session.execute(id, params);
         self.flush(session);
@@ -277,7 +310,12 @@ impl<H: Hub> DeckLive<H> {
         }
         done.map_err(|e| {
             let e = e.to_string();
-            if self.map.block.is_some() && e.contains(deckcraft_engine::cmd::NO_ID_SPACE) { NO_SPACE_TEXT.to_owned() } else { e }
+            match (e.contains(deckcraft_engine::cmd::NO_ID_SPACE), self.map.block.is_some()) {
+                (true, true) => NO_SPACE_TEXT.to_owned(),
+                // No space granted yet: the empty block minted nothing.
+                (true, false) => craft_live::CONNECTING.to_owned(),
+                (false, _) => e,
+            }
         })
     }
 
@@ -375,7 +413,11 @@ impl<H: Hub> DeckLive<H> {
     /// Ends the session: the observer and the undo hook come off, the engine's history is cleared
     /// (its snapshots predate the peers' changes) and the id block is dropped, so the
     /// presentation is an ordinary one again.
-    pub fn stop(self, session: &mut Session) {
+    pub fn stop(mut self, session: &mut Session) {
+        self.detach(session);
+    }
+
+    fn detach(&mut self, session: &mut Session) {
         session.set_edit_observer(self.map.doc, None);
         session.set_live_undo_hook(self.map.doc, None);
         self.clear_history(session);

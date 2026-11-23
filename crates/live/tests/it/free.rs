@@ -3,8 +3,9 @@
 
 use std::collections::BTreeSet;
 
-use deckcraft_engine::PointerKind;
-use deckcraft_live::EDIT_TOO_LARGE_TEXT;
+use craft_collab::Replica;
+use deckcraft_engine::{Mods, PointerKind};
+use deckcraft_live::{EDIT_TOO_LARGE_TEXT, WIRE_LIMIT};
 use deckcraft_model::{ShapeId, SlideId};
 use serde_json::json;
 
@@ -143,12 +144,37 @@ fn held_remote_change_lands_after_the_drop() {
     r.assert_converged();
 }
 
-/// Esc cancels a gesture by putting back the document from before it. In the engine only an IME
-/// composition and an Edit Points drag can be cancelled (a move drag has no cancel), and Edit
-/// Points is not shared yet, so the cancelled gesture here is a composition: its empty preedit is
-/// what Esc sends.
+/// Esc on a point drag in Edit Points puts back the shape from before the drag (the engine's
+/// only drag with a cancel); the remote change held meanwhile then lands.
 #[test]
 fn cancelled_drag_keeps_the_remote_change() {
+    let mut r = Room::new(basic(), 2, 12);
+    let a = find(&r.peers[0].doc(), "alpha");
+    let fill0 = shape_of(&r.peers[0].doc(), a).and_then(|s| s.fill);
+    r.peers[0].run("edit.select", json!({"ids": [a.0]})).expect("select");
+    r.peers[0].run("shape.editPoints", json!({"id": a.0, "on": true})).expect("edit points");
+    r.settle();
+    let geom = shape_of(&r.peers[0].doc(), a).map(|s| s.geom).expect("shape");
+    let points = r.peers[0].session.execute("shape.points", &json!({"id": a.0})).expect("points");
+    let first = &points["paths"][0][0];
+    let (x, y) = (first[0].as_f64().expect("x"), first[1].as_f64().expect("y"));
+    r.peers[0].session.pointer(ev(PointerKind::Down, x, y)).expect("down on a point");
+    r.peers[0].session.pointer(ev(PointerKind::Drag, x + 30.0, y + 20.0)).expect("drag");
+    r.peers[1].run("shape.fill", json!({"ids": [a.0], "color": "#0000C0"})).expect("fill");
+    for _ in 0..4 {
+        r.pump_all();
+    }
+    assert!(r.peers[0].live.holding(), "the remote change waits for the drag");
+    r.peers[0].session.key("Escape", Mods::default()).expect("escape");
+    r.settle();
+    assert!(shape_of(&r.peers[0].doc(), a).map(|s| s.geom) == Some(geom), "the cancelled drag moved no point");
+    assert!(shape_of(&r.peers[0].doc(), a).and_then(|s| s.fill) != fill0, "the remote colour stays");
+    r.assert_converged();
+}
+
+/// An empty preedit (what Esc sends) cancels a composition; the held remote change lands.
+#[test]
+fn cancelled_composition_keeps_the_remote_change() {
     let mut r = Room::new(basic(), 2, 6);
     let a = find(&r.peers[0].doc(), "alpha");
     let fill0 = shape_of(&r.peers[0].doc(), a).and_then(|s| s.fill);
@@ -251,5 +277,70 @@ fn a_composition_commits_onto_held_remote_text() {
         let t = text_of(&r, i, a);
         assert!(t.contains("ki") && t.contains('Q') && t.contains("alpha"), "peer {i} keeps both: {t:?}");
     }
+    r.assert_converged();
+}
+
+/// Text of `n` bytes set on alpha by peer 0.
+fn set_text_of(r: &mut Room, n: usize) -> Result<serde_json::Value, String> {
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.peers[0].run("text.set", json!({"id": a.0, "text": "y".repeat(n)}))
+}
+
+/// The bytes of text whose update fills the gate's limit on the wire (base64 is 4/3).
+fn limit_text() -> usize {
+    WIRE_LIMIT / 4 * 3
+}
+
+#[test]
+fn an_edit_just_under_the_frame_goes_through() {
+    let mut r = Room::new(basic(), 2, 13);
+    r.peers[0].live.take_sent();
+    let n = limit_text() - 16 * 1024;
+    set_text_of(&mut r, n).expect("under the frame");
+    let sent = r.peers[0].live.take_sent();
+    assert!(sent.len() == 1 && sent[0].wire <= sent[0].bound && sent[0].bound <= WIRE_LIMIT, "sent within the gate's bound");
+    r.settle();
+    let a = find(&r.peers[0].doc(), &"y".repeat(n));
+    assert!(text_of(&r, 1, a).len() == n, "the other peer has all of it");
+    r.assert_converged();
+}
+
+#[test]
+fn an_edit_just_over_the_frame_is_refused_and_the_replica_is_unchanged() {
+    let mut r = Room::new(basic(), 2, 14);
+    let before = r.peers[0].doc();
+    let state = r.peers[0].live.replica().expect("replica").state();
+    let seq = r.relay.seq();
+    let got = set_text_of(&mut r, limit_text() + 16 * 1024);
+    assert!(got == Err(EDIT_TOO_LARGE_TEXT.to_owned()), "refused with the reason");
+    assert!(r.peers[0].live.replica().expect("replica").state() == state, "nothing was written to the replica");
+    assert!(*r.peers[0].doc() == *before, "the deck is put back");
+    assert!(r.relay.seq() == seq, "nothing was sent");
+    r.settle();
+    r.assert_converged();
+}
+
+/// The gate's bound is an upper bound of the real updates, for numbers, text and whole slides.
+#[test]
+fn the_gate_bound_covers_every_real_update() {
+    let mut r = Room::new(heavy(), 2, 15);
+    r.peers[0].live.take_sent();
+    let a = r.peers[0].doc().slides[0].shapes[0].id;
+    let steps = [
+        ("shape.insert", json!({"preset": "star5", "rect": [10.123_456_789, 20.987_654_321, 33.333_333, 44.444_444]})),
+        ("shape.setBounds", json!({"ids": [a.0], "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4})),
+        ("text.set", json!({"id": a.0, "text": "\u{e9}\u{4e2d}\u{1f600}\n".repeat(20_000)})),
+        ("slide.duplicate", json!({"index": 0})),
+        ("slide.new", json!({"layout": "titleAndContent", "title": "T", "body": "a\n\tb\n\t\tc"})),
+    ];
+    for (id, params) in steps {
+        r.peers[0].run(id, params).unwrap_or_else(|e| panic!("{id}: {e}"));
+    }
+    let sent = r.peers[0].live.take_sent();
+    assert!(sent.len() == 5, "one group per command");
+    for g in &sent {
+        assert!(g.wire > 0 && g.wire <= g.bound, "the real update is within the bound: {g:?}");
+    }
+    r.settle();
     r.assert_converged();
 }

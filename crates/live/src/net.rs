@@ -21,6 +21,10 @@ use crate::gate::{MEDIA_TEXT, NOT_YET_TEXT};
 /// Why a copy of slides or shapes with animations or comments is refused (Ruling D15).
 pub const COPY_UNSHARED_TEXT: &str = "Slides or shapes with animations or comments can't be copied while editing live yet";
 
+/// Why adding, removing or moving slides is refused in a presentation with sections or custom
+/// shows: the room does not share them yet (owner ruling on L4 review Important 3).
+pub const SECTIONS_TEXT: &str = "Slides can't be added, removed or moved while editing live in a presentation with sections or custom shows yet";
+
 /// Why `after` cannot be shared as an edit of `before`, or None when it can.
 #[must_use]
 pub fn unshared(before: &Presentation, after: &Presentation) -> Option<&'static str> {
@@ -40,8 +44,6 @@ pub fn unshared(before: &Presentation, after: &Presentation) -> Option<&'static 
         && same_list(&before.masters, &after.masters)
         && same_opt(&before.notes_master, &after.notes_master)
         && same_opt(&before.handout_master, &after.handout_master)
-        && before.sections == after.sections
-        && before.custom_shows == after.custom_shows
         && before.show == after.show
         && before.header_footer == after.header_footer
         && before.props == after.props
@@ -56,6 +58,9 @@ pub fn unshared(before: &Presentation, after: &Presentation) -> Option<&'static 
         && before.raw_ext == after.raw_ext;
     if !outside_slides {
         return Some(NOT_YET_TEXT);
+    }
+    if before.sections != after.sections || before.custom_shows != after.custom_shows {
+        return Some(SECTIONS_TEXT);
     }
     let earlier: HashMap<SlideId, &Arc<Slide>> = before.slides.iter().map(|s| (s.id, s)).collect();
     let mut everywhere: Option<HashSet<ShapeId>> = None;
