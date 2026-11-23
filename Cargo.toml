@@ -41,10 +41,11 @@ deckcraft-ui-egui = { path = "crates/ui-egui" }
 deckcraft-media = { path = "crates/media" }
 deckcraft-live = { path = "crates/live" }
 # Live co-editing (collab-craft, miqbalf fork): departs from AGENTS.md rule 10 by owner decision
-# (as for GridCraft and WordCraft). All three come from one collab-craft revision (origin/m1/c9: C8 + C9).
-craft-collab = { git = "https://github.com/miqbalf/collab-craft", rev = "22867b0e3f89c737c32d1dab1c05a268789d39c2", version = "=0.1.0" }
-craft-live = { git = "https://github.com/miqbalf/collab-craft", rev = "22867b0e3f89c737c32d1dab1c05a268789d39c2", version = "=0.1.0" }
-craft-live-worker = { git = "https://github.com/miqbalf/collab-craft", rev = "22867b0e3f89c737c32d1dab1c05a268789d39c2", version = "=0.1.0" }
+# (as for GridCraft and WordCraft). All three come from one collab-craft revision (origin/m1/c9-save:
+# C8 + C9 merged with fix/save-timeout d78c926, the prod worker's fixes).
+craft-collab = { git = "https://github.com/miqbalf/collab-craft", rev = "17a46eb1c2803a6c67d2d81ca5ffd9289669ce42", version = "=0.1.0" }
+craft-live = { git = "https://github.com/miqbalf/collab-craft", rev = "17a46eb1c2803a6c67d2d81ca5ffd9289669ce42", version = "=0.1.0" }
+craft-live-worker = { git = "https://github.com/miqbalf/collab-craft", rev = "17a46eb1c2803a6c67d2d81ca5ffd9289669ce42", version = "=0.1.0" }
 
 # foundation
 kurbo = { version = "0.13", features = ["serde"] }
