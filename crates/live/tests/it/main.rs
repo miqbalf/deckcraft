@@ -8,3 +8,4 @@ mod reconnect;
 mod support;
 mod text;
 mod tomb;
+mod wire;

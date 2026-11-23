@@ -1063,3 +1063,37 @@ fn units<T: ReadTxn>(txn: &T, t: &TextRef, kind: OffsetKind) -> Vec<u32> {
     }
     out
 }
+
+#[cfg(test)]
+mod wire_tests {
+    use craft_collab::yrs::{Any, Number};
+    use serde_json::{Value, json};
+
+    use super::wire_json;
+
+    fn float(f: f64) -> Value {
+        wire_json(&Any::Number(Number::Float(f)))
+    }
+
+    #[test]
+    fn integral_floats_beyond_i32_read_as_the_integers_yrs_sent() {
+        // What yrs makes of a live-minted id on the wire, and the most negative i32 it floats.
+        assert_eq!(float(2_147_549_184.0), json!(2_147_549_184_u64));
+        assert_eq!(float(-2_147_483_648.0), json!(-2_147_483_648_i64));
+        // Inside nested values too, as in a connector's ends.
+        let nested = Any::Map(std::sync::Arc::new(
+            [("ends".to_owned(), Any::Array(std::sync::Arc::from(vec![Any::Number(Number::Float(4_294_901_761.0))])))].into_iter().collect(),
+        ));
+        assert_eq!(wire_json(&nested), json!({"ends": [4_294_901_761_u64]}));
+    }
+
+    #[test]
+    fn other_numbers_are_left_as_they_are() {
+        // A fraction, a float within the i32 range, and one past 2^53 (not exact as an integer).
+        for f in [1.5e9 + 0.5, 1.5e9, 100.0, 9_007_199_254_740_994.0] {
+            assert_eq!(float(f), json!(f), "{f}");
+        }
+        assert_eq!(wire_json(&Any::Number(Number::Int(7))), json!(7));
+        assert_eq!(float(f64::NAN), Value::Null, "not a number stays what to_json makes of it");
+    }
+}
