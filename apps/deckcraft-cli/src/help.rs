@@ -148,6 +148,26 @@ flag to grant access to more folders; a root left out grants none of its access.
 server, so they conflict with --connect (a running app is not confined by them).",
     },
     Subcommand {
+        name: "live-worker",
+        usage: "live-worker --listen ADDR --relay URL --nextcloud URL [--insecure-dev]",
+        summary: "save live co-edited presentations back to Nextcloud",
+        details: "Runs the document service of live co-editing for the Craft Office Nextcloud app. The app tells
+it about each room it grants on ADDR (HOST:PORT, a private address only the app reaches); for each
+room it joins the relay at URL as the service peer, follows the editors' changes and saves the
+presentation back to Nextcloud at URL as .pptx: a few seconds after the last edit, at least every
+minute while edits keep coming, and once more when the last editor leaves. When the file was
+changed outside the live session, that version is kept aside as a conflict copy first. Only .pptx
+presentations are served; pictures, animations, comments and other parts the live session does not
+share are kept from the file as the room opened it.
+
+The secrets come from the environment, never the command line: CRAFT_RELAY_SECRET (the relay's
+ticket secret) and CRAFT_WORKER_SECRET (shared with the Nextcloud app), each at least 32 bytes.
+CRAFT_WORKER_MAX_ROOMS caps the rooms served at once (64 by default). --insecure-dev allows plain
+http:// URLs, for a development stack only.
+
+  deckcraft-cli live-worker --listen 0.0.0.0:9557 --relay wss://relay.example --nextcloud https://cloud.example",
+    },
+    Subcommand {
         name: "bench",
         usage: "bench (FILE | --sample) [--runs N] [--json]",
         summary: "time opening, drawing, saving and exporting a presentation",

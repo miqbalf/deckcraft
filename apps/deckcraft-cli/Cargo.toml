@@ -17,6 +17,17 @@ path = "src/main.rs"
 deckcraft-engine = { workspace = true }
 deckcraft-mcp = { workspace = true }
 serde_json = { workspace = true }
+# live-worker: DeckCraft's document service for live co-editing. The worker loop is
+# craft-live-worker's, shared by every Craft app; src/live_worker.rs is DeckCraft's service on it.
+# The collab-craft crates come from miqbalf/collab-craft at one rev, departing from AGENTS.md
+# rule 10 by owner decision.
+deckcraft-live = { workspace = true }
+deckcraft-model = { workspace = true }
+craft-live-worker = { workspace = true }
+craft-live = { workspace = true }
+craft-collab = { workspace = true, features = ["native-hub"] }
+log = { workspace = true }
 
 [dev-dependencies]
 zip = { workspace = true }
+craft-live = { workspace = true, features = ["test-util"] }

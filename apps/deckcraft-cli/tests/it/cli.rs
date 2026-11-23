@@ -14,7 +14,8 @@ fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
-const SUBCOMMANDS: [&str; 11] = ["info", "render", "render-transition", "convert", "run", "commands", "describe", "app", "mcp", "bench", "links"];
+const SUBCOMMANDS: [&str; 12] =
+    ["info", "render", "render-transition", "convert", "run", "commands", "describe", "app", "mcp", "live-worker", "bench", "links"];
 
 fn words(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -286,4 +287,24 @@ fn commands_lists_one_line_per_command() {
     assert_eq!(stdout(&cli(&["commands", "format.size"])), "format.size — Font Size: {size: pt}\n");
     assert_eq!(stdout(&cli(&["commands", "slide.next"])), "slide.next — Next Slide\n");
     assert_eq!(stdout(&cli(&["commands", "shape.presets"])), "shape.presets — Shape Gallery → [{name, label, category}]\n");
+}
+
+#[test]
+fn live_worker_refuses_what_it_does_not_take() {
+    let o = cli(&["live-worker", "--listen", "127.0.0.1:0", "--relay", "https://r", "--nextcloud", "https://n", "--frobnicate"]);
+    assert!(!o.status.success() && stderr(&o).contains("--frobnicate"), "an unknown option is refused");
+    let o = Command::new(crate::deckcraft_cli())
+        .args(["live-worker", "--relay", "https://r", "--nextcloud", "https://n"])
+        .env("CRAFT_RELAY_SECRET", "x".repeat(64))
+        .env("CRAFT_WORKER_SECRET", "y".repeat(64))
+        .output()
+        .unwrap();
+    assert!(!o.status.success() && stderr(&o).contains("--listen"), "a missing option is named");
+    let o = Command::new(crate::deckcraft_cli())
+        .args(["live-worker", "--listen", "127.0.0.1:0", "--relay", "https://r", "--nextcloud", "https://n"])
+        .env_remove("CRAFT_RELAY_SECRET")
+        .env_remove("CRAFT_WORKER_SECRET")
+        .output()
+        .unwrap();
+    assert!(!o.status.success() && stderr(&o).contains("CRAFT_RELAY_SECRET"), "a missing secret is named");
 }

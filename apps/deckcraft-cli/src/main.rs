@@ -5,6 +5,7 @@
 mod automation_args;
 
 mod help;
+mod live_worker;
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,6 +88,7 @@ fn main() -> ExitCode {
         Some("describe") => report(describe(rest.first().map(String::as_str))),
         Some("app") => report(app(rest)),
         Some("mcp") => report(mcp(rest)),
+        Some("live-worker") => report(live_worker_cmd(rest)),
         Some("links") => {
             use deckcraft_engine::links::{APP_PAGE, DISCORD, GITHUB, WEBSITE};
             outln!("Discord   {DISCORD}\nWebsite   {WEBSITE}\nApp page  {APP_PAGE}\nGitHub    {GITHUB}");
@@ -95,6 +97,31 @@ fn main() -> ExitCode {
         Some(other) => unknown(other),
         None => usage(),
     }
+}
+
+/// `live-worker --listen ADDR --relay URL --nextcloud URL [--insecure-dev]`: serve live rooms
+/// until listening fails. The secrets come from the environment, never from the command line.
+fn live_worker_cmd(args: &[String]) -> Result<(), String> {
+    let (mut listen, mut relay, mut nextcloud, mut insecure_dev) = (None, None, None, false);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |name: &str| it.next().cloned().ok_or_else(|| format!("live-worker: {name} needs a value"));
+        match a.as_str() {
+            "--listen" => listen = Some(value("--listen")?),
+            "--relay" => relay = Some(value("--relay")?),
+            "--nextcloud" => nextcloud = Some(value("--nextcloud")?),
+            "--insecure-dev" => insecure_dev = true,
+            other => return Err(format!("live-worker: unknown argument `{other}`\n\n{}", help_page("live-worker"))),
+        }
+    }
+    let need = |v: Option<String>, name: &str| v.ok_or_else(|| format!("live-worker: {name} is required\n\n{}", help_page("live-worker")));
+    let (listen, relay, nextcloud) = (need(listen, "--listen")?, need(relay, "--relay")?, need(nextcloud, "--nextcloud")?);
+    let relay_secret = std::env::var("CRAFT_RELAY_SECRET").ok();
+    let worker_secret = std::env::var("CRAFT_WORKER_SECRET").ok();
+    let cfg = craft_live_worker::Config::new(&listen, &relay, &nextcloud, insecure_dev, relay_secret.as_deref(), worker_secret.as_deref())
+        .and_then(|cfg| cfg.with_max_rooms(std::env::var("CRAFT_WORKER_MAX_ROOMS").ok().as_deref()))
+        .map_err(|e| format!("live-worker: {e}"))?;
+    craft_live_worker::serve(cfg, live_worker::DeckService).map_err(|e| format!("live-worker: {e}"))
 }
 
 fn is_help(arg: &str) -> bool {
