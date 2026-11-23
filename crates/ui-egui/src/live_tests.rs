@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use craft_live::Access;
 use craft_live::testing::{MemHub, MemRelay, ROOM};
 use deckcraft_engine::{Mods, PointerEvent, PointerKind, Session};
-use deckcraft_live::{BaseFile, DeckLive, MEDIA_TEXT, NOT_YET_TEXT, Notice, READ_ONLY_TEXT, SECTIONS_TEXT};
+use deckcraft_live::{BaseFile, DeckLive, MEDIA_TEXT, NOT_YET_TEXT, READ_ONLY_TEXT, SECTIONS_TEXT};
 use deckcraft_model::{Presentation, ShapeId, SlideId};
 use egui::accesskit::Role;
 use egui::{Color32, Rect};
@@ -72,8 +72,9 @@ impl Bob {
 }
 
 struct Room {
-    #[allow(dead_code)]
     relay: MemRelay,
+    /// Ann's link, for dropping it.
+    ann_hub: MemHub,
     h: Harness<'static, SlideApp>,
     bob: Bob,
     clock: Arc<AtomicU64>,
@@ -82,16 +83,21 @@ struct Room {
 impl Room {
     /// Ann in the window and Bob beside her, with the given tickets, on `bytes`.
     fn new(bytes: &[u8], ann: Access, bob: Access) -> Room {
+        Room::with_services(bytes, ann, bob, Services::default())
+    }
+
+    fn with_services(bytes: &[u8], ann: Access, bob: Access, services: Services) -> Room {
         let relay = MemRelay::new();
         let clock = Arc::new(AtomicU64::new(0));
         let base = BaseFile { bytes, name: NAME, expected_sha256: None };
 
         let hub = relay.connect("ann", "Ann", ann == Access::Edit);
+        let ann_hub = hub.clone();
         let mut session = Session::new();
         let mut live = DeckLive::start(BoxHub(Box::new(hub)), ROOM, &base, ann, "ann", &mut session).unwrap();
         let c = clock.clone();
         live.set_clock(Box::new(move || c.load(Ordering::Relaxed) as f64));
-        let app = SlideApp::new(session, Services { live: Some(live), ..Default::default() });
+        let app = SlideApp::new(session, Services { live: Some(live), ..services });
         let h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_ui_state(
             |ui, app: &mut SlideApp| {
                 app.logic(ui.ctx());
@@ -106,7 +112,7 @@ impl Room {
         let c = clock.clone();
         live.set_clock(Box::new(move || c.load(Ordering::Relaxed) as f64));
 
-        let mut room = Room { relay, h, bob: Bob { live, session }, clock };
+        let mut room = Room { relay, ann_hub, h, bob: Bob { live, session }, clock };
         room.settle();
         room
     }
@@ -285,25 +291,6 @@ fn restore_button_restores_the_shape() {
 }
 
 #[test]
-fn restore_button_calls_restore_and_says_what_happened() {
-    let mut room = Room::editors(&deck(false));
-    let beta = find(&room.bob.doc(), "beta");
-    room.h
-        .state_mut()
-        .live
-        .as_mut()
-        .unwrap()
-        .push_notice(Notice { text: "Bob deleted this shape".into(), restore: Some(deckcraft_live::Tomb::Shape(beta)) });
-    room.h.run_steps(1);
-    room.h.get_by_role_and_label(Role::Button, RESTORE_LABEL).click();
-    room.h.run_steps(2);
-    assert!(room.h.query_by_role_and_label(Role::Button, RESTORE_LABEL).is_none(), "the notice was acted on");
-    let restored = room.ann_doc().slides[1].shape(beta).is_some();
-    let told = room.h.state_mut().fresh_status().is_some();
-    assert!(restored || told, "either the shape is there or the person is told why not");
-}
-
-#[test]
 fn read_only_blocks_typing_and_says_so() {
     let mut room = Room::new(&deck(false), Access::Read, Access::Edit);
     let alpha = find(&room.ann_doc(), "alpha");
@@ -359,6 +346,8 @@ fn a_lost_pointer_up_ends_the_drag() {
     let s = &mut room.h.state_mut().session;
     s.pointer(ev(PointerKind::Down, 100.0, 100.0)).unwrap();
     s.pointer(ev(PointerKind::Drag, 140.0, 120.0)).unwrap();
+    // Where the canvas records the drag as it goes (this test drives the session directly).
+    room.h.state_mut().last_drag_at = Some(deckcraft_geom::Point::new(140.0, 120.0));
     assert!(room.h.state().session.tool.dragging(), "a move drag is open");
     room.h.input_mut().events.push(egui::Event::WindowFocused(false));
     room.h.run_steps(1);
@@ -416,4 +405,199 @@ fn closing_the_live_presentation_leaves_the_room() {
     h.run_steps(2);
     assert!(h.state().live.is_none(), "the window let the live session go");
     assert!(gone.load(Ordering::Relaxed), "and closed its link to the room");
+}
+
+/// Records what the host was handed: downloads, or picks and writes.
+#[derive(Clone, Default)]
+struct HostLog(std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>);
+
+impl HostLog {
+    fn got(&self) -> Vec<(String, Vec<u8>)> {
+        self.0.borrow().clone()
+    }
+}
+
+/// A web host: every copy is a download.
+fn downloading(log: &HostLog) -> Services {
+    let l = log.clone();
+    Services { download: Some(Box::new(move |name: &str, b: &[u8]| l.0.borrow_mut().push((name.to_owned(), b.to_vec())))), ..Default::default() }
+}
+
+/// A desktop host whose Save dialog the person cancels.
+fn cancelling() -> Services {
+    Services { pick_save: Some(Box::new(|_: &str| None)), ..Default::default() }
+}
+
+fn copy() -> (String, Vec<u8>) {
+    ("Deck (unmerged 2026-11-23 1404).pptx".to_owned(), deck(false))
+}
+
+#[test]
+fn an_unmerged_copy_is_offered_and_saved() {
+    let log = HostLog::default();
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, downloading(&log));
+    room.h.state_mut().pending_unmerged.push(copy());
+    room.h.run_steps(2);
+    room.h.get_by_label(deckcraft_live::UNMERGED_TEXT);
+    room.h.get_by_role_and_label(Role::Button, super::live::SAVE_COPY_TEXT).click();
+    room.h.run_steps(2);
+    assert_eq!(log.got(), vec![copy()], "the host got the copy");
+    assert!(room.h.state().pending_unmerged.is_empty(), "nothing left to save");
+    assert!(room.h.query_by_label(deckcraft_live::UNMERGED_TEXT).is_none(), "the offer is gone");
+}
+
+#[test]
+fn a_cancelled_save_keeps_the_copy() {
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, cancelling());
+    room.h.state_mut().pending_unmerged.push(copy());
+    room.h.run_steps(2);
+    room.h.get_by_role_and_label(Role::Button, super::live::SAVE_COPY_TEXT).click();
+    room.h.run_steps(2);
+    assert_eq!(room.h.state().pending_unmerged, vec![copy()], "the copy is still there");
+    room.h.get_by_role_and_label(Role::Button, super::live::SAVE_COPY_TEXT);
+}
+
+/// Ann's link drops, she keeps typing (editing goes on while reconnecting), and the live
+/// presentation is closed by a path that is not `run("file.close")`: what the room never got
+/// comes to the host as the unmerged copy.
+#[test]
+fn closing_hands_the_unmerged_copy_over() {
+    let log = HostLog::default();
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, downloading(&log));
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.relay.drop_link(&room.ann_hub);
+    room.settle();
+    let app = room.h.state_mut();
+    app.run("slide.go", json!({"index": 1})).unwrap();
+    app.run("text.edit", json!({"id": alpha.0})).unwrap();
+    app.run("text.insert", json!({"text": "offline"})).unwrap();
+    room.h.run_steps(1);
+    let i = room.h.state().session.active_index().unwrap();
+    room.h.state_mut().session.close_document(i);
+    room.h.run_steps(2);
+    assert!(room.h.state().live.is_none(), "the window left the room");
+    let got = log.got();
+    assert_eq!(got.len(), 1, "one copy handed over");
+    let back = deckcraft_engine::cmd::file::open_presentation(&got[0].0, &got[0].1).unwrap();
+    assert!(back.slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text().contains("offline"), "with Ann's offline text");
+}
+
+/// Quitting the window ends the live session first; a copy that could not be saved stays offered.
+#[test]
+fn ending_the_live_session_keeps_unsent_edits() {
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, cancelling());
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.relay.drop_link(&room.ann_hub);
+    room.settle();
+    let app = room.h.state_mut();
+    app.run("slide.go", json!({"index": 1})).unwrap();
+    app.run("text.edit", json!({"id": alpha.0})).unwrap();
+    app.run("text.insert", json!({"text": "offline"})).unwrap();
+    room.h.state_mut().end_live();
+    assert!(room.h.state().live.is_none(), "the session ended");
+    assert_eq!(room.h.state().pending_unmerged.len(), 1, "its unsent edits wait to be saved");
+}
+
+fn slide_to_screen(h: &Harness<'_, SlideApp>, x: f64, y: f64) -> egui::Pos2 {
+    let app = h.state();
+    let r = app.slide_rect.unwrap();
+    egui::pos2(r.min.x + x as f32 * app.canvas_scale, r.min.y + y as f32 * app.canvas_scale)
+}
+
+/// A touch end delivers the release and PointerGone in one frame: the drop lands at the release.
+#[test]
+fn a_release_with_pointer_gone_drops_at_the_release() {
+    let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.run_steps(2);
+    let from = slide_to_screen(&room.h, 160.0, 100.0);
+    let to = slide_to_screen(&room.h, 260.0, 180.0);
+    let mid = from + (to - from) * 0.5;
+    let press =
+        |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+    room.h.input_mut().events.extend([egui::Event::PointerMoved(from), press(from, true)]);
+    room.h.run_steps(1);
+    room.h.input_mut().events.push(egui::Event::PointerMoved(mid));
+    room.h.run_steps(1);
+    room.h.input_mut().events.extend([egui::Event::PointerMoved(to), press(to, false), egui::Event::PointerGone]);
+    room.h.run_steps(2);
+    assert!(!room.h.state().session.tool.dragging(), "the drag ended");
+    let x = room.ann_doc().slides[1].shape(alpha).unwrap().xfrm.unwrap();
+    // Within snapping of the release point; the previous frame's point is 50 away.
+    assert!((x.x - 160.0).abs() < 5.0 && (x.y - 140.0).abs() < 5.0, "moved by the whole drag, to the release: {x:?}");
+}
+
+#[test]
+fn clicking_a_shape_under_a_peer_outline_selects_it() {
+    let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.bob.run("slide.go", json!({"index": 1}));
+    room.bob.run("edit.select", json!({"ids": [alpha.0]}));
+    room.settle();
+    let at = slide_to_screen(&room.h, 160.0, 100.0);
+    room.h.input_mut().events.push(egui::Event::PointerMoved(at));
+    room.h.run_steps(1);
+    let press =
+        |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+    room.h.input_mut().events.push(press(true));
+    room.h.run_steps(1);
+    room.h.input_mut().events.push(press(false));
+    room.h.run_steps(2);
+    assert_eq!(room.ann().session.active().unwrap().selection.shapes, vec![alpha], "the click reached the canvas");
+}
+
+/// A viewer's drag and shortcut never change the deck, not even for a frame.
+#[test]
+fn read_only_gestures_and_shortcuts_change_nothing() {
+    let mut room = Room::new(&deck(false), Access::Read, Access::Edit);
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("edit.select", json!({"ids": [alpha.0]})).unwrap();
+    room.h.run_steps(2);
+    let before = room.ann_doc();
+    let from = slide_to_screen(&room.h, 160.0, 100.0);
+    let to = slide_to_screen(&room.h, 260.0, 180.0);
+    let press =
+        |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+    room.h.input_mut().events.extend([egui::Event::PointerMoved(from), press(from, true)]);
+    room.h.run_steps(1);
+    room.h.input_mut().events.push(egui::Event::PointerMoved(to));
+    room.h.run_steps(1);
+    assert!(*before == *room.ann_doc(), "no move while dragging");
+    room.h.input_mut().events.extend([press(to, false)]);
+    room.h.run_steps(1);
+    assert!(*before == *room.ann_doc(), "no move at the drop");
+    let cmd = egui::Modifiers { command: true, ctrl: !cfg!(target_os = "macos"), ..Default::default() };
+    room.h.input_mut().events.push(egui::Event::Key { key: egui::Key::D, physical_key: None, pressed: true, repeat: false, modifiers: cmd });
+    room.h.run_steps(1);
+    assert!(*before == *room.ann_doc(), "no duplicate");
+}
+
+#[test]
+fn a_broken_link_says_so_not_paused() {
+    let mut room = Room::editors(&deck(false));
+    room.h.state_mut().live.as_mut().unwrap().live_mut().core_mut().end(craft_live::BROKEN);
+    room.h.run_steps(1);
+    let why = room.h.state().live_refusal("slide.new").map(|s| s.to_string());
+    assert_eq!(why.as_deref(), Some(craft_live::BROKEN), "greyed with the link's reason");
+    assert_ne!(room.h.state().live_typing_refused().map(|s| s.to_string()).as_deref(), Some(deckcraft_live::PAUSED_TEXT));
+}
+
+/// Two shortcut edits in one frame are two groups, as two commands are.
+#[test]
+fn each_shortcut_edit_is_its_own_group() {
+    let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("edit.select", json!({"ids": [alpha.0]})).unwrap();
+    room.h.run_steps(1);
+    let _ = room.h.state_mut().live.as_mut().unwrap().live_mut().take_sent();
+    let cmd = egui::Modifiers { command: true, ctrl: !cfg!(target_os = "macos"), ..Default::default() };
+    let key = egui::Event::Key { key: egui::Key::D, physical_key: None, pressed: true, repeat: false, modifiers: cmd };
+    room.h.input_mut().events.extend([key.clone(), key]);
+    room.h.run_steps(2);
+    let sent = room.h.state_mut().live.as_mut().unwrap().live_mut().take_sent();
+    assert_eq!(sent.len(), 2, "one group per duplicate");
 }

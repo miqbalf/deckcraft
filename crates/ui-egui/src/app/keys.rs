@@ -109,14 +109,10 @@ impl SlideApp {
             self.drain_requests();
             return;
         }
-        let img = if image_paste { self.services.clipboard_image.as_mut().and_then(|f| f()) } else { None };
-        if let Some(png) = img {
-            let data = deckcraft_engine::cmd::base64_encode(&png);
-            if let Err(e) = self.session.execute("insert.picture", &json!({"name": "Pasted image.png", "data": data})) {
-                self.set_status(e.to_string());
-            }
-        }
         let refused = self.live_typing_refused();
+        if image_paste {
+            self.paste_clipboard_image(refused);
+        }
         for e in events {
             // Read-only or paused live presentation: typing, pasting and the editing keys are not
             // taken, and the person is told why (anything else that edits is put back by the
@@ -143,8 +139,8 @@ impl SlideApp {
                 egui::Event::PasteImage(image) => match color_image_png(&image) {
                     Ok(png) => {
                         let params = json!({"name": "Pasted image.png", "data": deckcraft_engine::cmd::base64_encode(&png)});
-                        if let Err(e) = self.session.execute("insert.picture", &params) {
-                            self.set_status(e.to_string());
+                        if let Err(e) = self.run_engine("insert.picture", &params) {
+                            self.set_status(e);
                         }
                     }
                     Err(e) => self.set_status(e),
@@ -177,18 +173,17 @@ impl SlideApp {
                     let revision = self.session.active().map(|d| d.revision);
                     let r = match img {
                         Some(png) => self
-                            .session
-                            .execute("insert.picture", &json!({"name": "Pasted image.png", "data": deckcraft_engine::cmd::base64_encode(&png)})),
+                            .run_engine("insert.picture", &json!({"name": "Pasted image.png", "data": deckcraft_engine::cmd::base64_encode(&png)})),
                         None => {
                             let mut params = json!({"text": text});
                             if let Some(h) = html {
                                 params["html"] = Value::String(h);
                             }
-                            self.session.execute("edit.paste", &params)
+                            self.run_engine("edit.paste", &params)
                         }
                     };
                     if let Err(e) = r {
-                        self.set_status(e.to_string());
+                        self.set_status(e);
                     }
                     if self.session.active().map(|d| d.revision) != revision {
                         self.note_application_edit(ctx);
@@ -210,6 +205,10 @@ impl SlideApp {
                         continue;
                     }
                     let name = key_name(key);
+                    // Read-only or paused: a key that would edit is not taken (the gate's reason).
+                    if self.refuse_key(name, mods, refused) {
+                        continue;
+                    }
                     let revision = self.session.active().map(|d| d.revision);
                     match self.session.key(name, mods) {
                         Ok(_) => {}
@@ -217,12 +216,58 @@ impl SlideApp {
                     }
                     if self.session.active().map(|d| d.revision) != revision {
                         self.note_application_edit(ctx);
+                        // Shared now, so each key's edit is its own group in the room.
+                        self.flush_live();
                     }
                 }
                 _ => {}
             }
         }
         self.drain_requests();
+    }
+}
+
+impl SlideApp {
+    /// Pastes the host clipboard's picture, unless the live presentation takes no edits now.
+    fn paste_clipboard_image(&mut self, refused: Option<&'static str>) {
+        let Some(png) = self.services.clipboard_image.as_mut().and_then(|f| f()) else { return };
+        if let Some(why) = refused {
+            self.set_status(crate::live::tr(why));
+            return;
+        }
+        let data = deckcraft_engine::cmd::base64_encode(&png);
+        if let Err(e) = self.run_engine("insert.picture", &json!({"name": "Pasted image.png", "data": data})) {
+            self.set_status(e);
+        }
+    }
+
+    /// True (and says why) when key `name` would edit while the live presentation takes none.
+    fn refuse_key(&mut self, name: &str, mods: Mods, refused: Option<&'static str>) -> bool {
+        let Some(why) = refused.and_then(|why| self.key_refusal(name, mods, why)) else { return false };
+        self.set_status(crate::live::tr(why));
+        true
+    }
+
+    /// Why key `name` is not taken while the live presentation takes no edits (`why`), when it
+    /// would edit: a shortcut for a command the gate refuses, or any other modifier shortcut, an
+    /// arrow that nudges the selected shapes, or Tab inside text.
+    fn key_refusal(&self, name: &str, mods: Mods, why: &'static str) -> Option<&'static str> {
+        let st = self.session.active()?;
+        let editing = st.selection.text.is_some();
+        let nudges = !editing && !st.selection.shapes.is_empty();
+        let arrow = matches!(name, "Left" | "Right" | "Up" | "Down");
+        if mods.cmd {
+            let spec = deckcraft_engine::command_specs()
+                .iter()
+                .find(|s| s.shortcut.is_some_and(|k| deckcraft_engine::keys::shortcut_matches(k, name, mods)));
+            return match spec {
+                Some(s) => self.live_refusal(s.id),
+                // Moving the caret or the view by word or page edits nothing.
+                None if arrow || matches!(name, "Home" | "End" | "PageUp" | "PageDown") => None,
+                None => Some(why),
+            };
+        }
+        ((arrow && nudges) || (editing && name == "Tab")).then_some(why)
     }
 }
 

@@ -37,7 +37,7 @@ pub(super) fn find_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bo
                     let mut p = q.clone();
                     p["with"] = json!(d.get("with", ""));
                     p["at"] = at;
-                    if app.session.execute("text.replace", &p).is_ok() {
+                    if app.run_engine("text.replace", &p).is_ok() {
                         let n = d.get("next", "1").parse::<usize>().unwrap_or(1);
                         d.fields.insert("next".into(), n.saturating_sub(1).to_string());
                     }
@@ -47,7 +47,7 @@ pub(super) fn find_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bo
             if ui.add_enabled(has, egui::Button::new("Replace All")).clicked() {
                 let mut p = q.clone();
                 p["with"] = json!(d.get("with", ""));
-                let msg = match app.session.execute("text.replace", &p) {
+                let msg = match app.run_engine("text.replace", &p) {
                     Ok(v) => format!("Replaced {} occurrence(s).", v.get("replaced").and_then(Value::as_u64).unwrap_or(0)),
                     Err(_) => format!("DeckCraft can't find “{text}”."),
                 };

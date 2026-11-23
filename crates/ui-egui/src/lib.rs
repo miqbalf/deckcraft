@@ -376,6 +376,11 @@ pub struct SlideApp {
     ime_reset: HashMap<egui::ViewportId, ImeResetPhase>,
     /// The presentation edited live with other people, while it is open ([`live::LiveUi`]).
     pub live: Option<live::LiveUi>,
+    /// Copies of local edits the live room never got, waiting to be saved: (file name, `.pptx`).
+    /// Kept until the host took one (a download, or a write that succeeded).
+    pub(crate) pending_unmerged: Vec<(String, Vec<u8>)>,
+    /// Closing the window has offered the waiting copies once; a second close goes ahead.
+    pub(crate) unmerged_close_offered: bool,
     /// Where the last pointer press or drag on the canvas was, in slide points: a drag whose
     /// release never arrives (the window lost focus, the browser cancelled the pointer) is
     /// ended there.

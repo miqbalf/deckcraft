@@ -161,7 +161,7 @@ pub fn canvas(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf) -> boo
                 }
             }
             Pick::TransparentColor => {
-                if let Err(e) = app.session.execute("picture.transparentColor", &serde_json::json!({"at": [p.x, p.y]})) {
+                if let Err(e) = app.run_engine("picture.transparentColor", &serde_json::json!({"at": [p.x, p.y]})) {
                     app.set_status(e.to_string());
                 }
             }

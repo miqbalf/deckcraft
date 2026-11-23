@@ -400,7 +400,7 @@ impl SlideApp {
         args["slides"] = json!(picked);
         let result = match self.reuse_target {
             Some(target) if !self.viewing_target(&target) => self.execute_on_target(&target, "Reuse Slides", "slide.reuse", &args),
-            _ => self.session.execute("slide.reuse", &args).map(|_| ()).map_err(|e| e.to_string()),
+            _ => self.run_engine("slide.reuse", &args).map(|_| ()),
         };
         match result {
             Ok(()) => {
@@ -429,11 +429,11 @@ impl SlideApp {
                         let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                         args["name"] = json!(name);
                         args["data"] = json!(deckcraft_engine::cmd::base64_encode(&bytes));
-                        self.session.execute(cmd, &args)
+                        self.run_engine(cmd, &args)
                     }
                     _ => {
                         args["path"] = json!(path);
-                        self.session.execute(cmd, &args)
+                        self.run_engine(cmd, &args)
                     }
                 };
                 if let Err(e) = r {
@@ -715,8 +715,10 @@ impl SlideApp {
         } else {
             json!({"name": name, "data": deckcraft_engine::cmd::base64_encode(bytes)})
         };
-        let result = if cmd == "file.openBytes" || self.viewing_target(&req.target) {
+        let result = if cmd == "file.openBytes" {
             self.session.execute(cmd, &params).map(|_| ()).map_err(|e| e.to_string())
+        } else if self.viewing_target(&req.target) {
+            self.run_engine(cmd, &params).map(|_| ())
         } else {
             self.execute_on_target(&req.target, name, cmd, &params)
         };
@@ -758,7 +760,7 @@ impl SlideApp {
             st.selection.text = None;
             st.selection.cells = None;
         }
-        let result = self.session.execute(cmd, params).map(|_| ()).map_err(|e| e.to_string());
+        let result = self.run_engine(cmd, params).map(|_| ());
         if view == Some(idx) {
             if let (Some(sel), Some(st)) = (saved, self.session.active_mut()) {
                 st.selection = sel;

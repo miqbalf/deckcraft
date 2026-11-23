@@ -72,8 +72,12 @@ pub const CURSOR_NAME: &str = "{name}'s cursor in {shape}";
 /// The accessible name of the dot on a slide an editor is on: `{name}`, `{slide}`.
 pub const ON_SLIDE_NAME: &str = "{name} on slide {slide}";
 
+/// Why nothing is taken once the link to the room ended for a reason the window has no line for.
+pub const LINK_ENDED_TEXT: &str = "The link to the other editors ended. Reopen the file to keep editing.";
+
 /// Every English key this module draws, for the translation report.
-pub const ENGLISH_KEYS: &[&str] = &[RESTORE_LABEL, VIEWING_TEXT, LIVE_TEXT, SAVE_COPY_TEXT, DISMISS_TEXT, SELECTION_NAME, CURSOR_NAME, ON_SLIDE_NAME];
+pub const ENGLISH_KEYS: &[&str] =
+    &[RESTORE_LABEL, VIEWING_TEXT, LIVE_TEXT, SAVE_COPY_TEXT, DISMISS_TEXT, SELECTION_NAME, CURSOR_NAME, ON_SLIDE_NAME, LINK_ENDED_TEXT];
 
 /// The translation lookup for an English key. DeckCraft has no translation catalogue yet, so this
 /// is English as it stands; every live line goes through it so a catalogue needs one change.
@@ -105,6 +109,8 @@ pub(crate) fn gate_hint(resp: egui::Response, enabled: bool) -> egui::Response {
 /// tooltip when the live gate greyed it.
 pub(crate) fn menu_button(app: &SlideApp, ui: &mut Ui, label: &str, id: &str) -> egui::Response {
     let r = ui.add_enabled(crate::ribbon::enabled(app, id), egui::Button::new(label));
+    // The reason is shown here; left in the slot it would reach the next ribbon widget.
+    GATED.take();
     match app.live_refusal(id) {
         Some(why) => r.on_disabled_hover_text(tr(why)),
         None => r,
@@ -144,8 +150,6 @@ pub struct LiveUi {
     bar: PresenceBar,
     notices: Vec<Notice>,
     sent: Option<SelKey>,
-    /// A copy of local edits the room could not merge, waiting to be saved: (file name, `.pptx`).
-    unmerged: Option<(String, Vec<u8>)>,
     /// Per editor: a signature of their selection's place and when it last changed (`ui` time).
     moved: HashMap<String, (u64, f64)>,
 }
@@ -153,16 +157,7 @@ pub struct LiveUi {
 impl LiveUi {
     #[must_use]
     pub fn new(live: LiveDeck) -> LiveUi {
-        LiveUi {
-            live,
-            peers: Vec::new(),
-            colours: HashMap::new(),
-            bar: PresenceBar::new(),
-            notices: Vec::new(),
-            sent: None,
-            unmerged: None,
-            moved: HashMap::new(),
-        }
+        LiveUi { live, peers: Vec::new(), colours: HashMap::new(), bar: PresenceBar::new(), notices: Vec::new(), sent: None, moved: HashMap::new() }
     }
 
     #[must_use]
@@ -205,7 +200,9 @@ impl LiveUi {
     }
 
     /// One frame: share and take in edits, then tell the room where the selection is when it moved.
-    pub fn pump(&mut self, session: &mut Session) {
+    /// Returns a copy of local edits the room could not merge, when one was handed over.
+    #[must_use]
+    pub fn pump(&mut self, session: &mut Session) -> Option<(String, Vec<u8>)> {
         self.peers = self.live.pump(session);
         let ids: Vec<String> = self.peers.iter().map(|p| p.id.clone()).collect();
         self.colours = ids.iter().cloned().zip(colours_for(&ids)).collect();
@@ -213,9 +210,7 @@ impl LiveUi {
         self.moved.retain(|id, _| ids.contains(id));
         self.take_notices();
         // Taken after every pump: each hand-over since the last take is in the newest copy.
-        if let Some(copy) = self.live.take_unmerged() {
-            self.unmerged = Some(copy);
-        }
+        let copy = self.live.take_unmerged();
         let key = session.documents().iter().find(|d| d.uid == self.live.doc()).map(|st| {
             let sel = &st.selection;
             (sel.slide, sel.shapes.clone(), sel.text.as_ref().map(|t| (t.shape, t.anchor, t.caret, t.notes)))
@@ -224,6 +219,7 @@ impl LiveUi {
             self.live.send_selection(session);
             self.sent = key;
         }
+        copy
     }
 
     /// Runs an engine command through the gate; the notices it gave are kept.
@@ -257,13 +253,27 @@ impl LiveUi {
         if sections && SLIDE_MOVES.contains(&engine) {
             return Err(SECTIONS_TEXT);
         }
-        self.live.allows(engine)
+        self.live.allows(engine).map_err(|why| self.why_not(why))
+    }
+
+    /// The live session says "paused" for every state that takes no edits; a link that is still
+    /// connecting, or broke, or was refused, says that instead.
+    fn why_not(&self, why: &'static str) -> &'static str {
+        if why != deckcraft_live::PAUSED_TEXT {
+            return why;
+        }
+        match self.live.status() {
+            LiveStatus::Connecting => craft_live::CONNECTING,
+            LiveStatus::Broken(m) | LiveStatus::Refused(m) if m == craft_live::BROKEN => craft_live::BROKEN,
+            LiveStatus::Broken(_) | LiveStatus::Refused(_) => LINK_ENDED_TEXT,
+            _ => why,
+        }
     }
 
     /// Why typing is not taken now, when it is not.
     #[must_use]
     pub fn typing_refused(&self) -> Option<&'static str> {
-        self.live.allows("text.insert").err()
+        self.live.allows("text.insert").err().map(|why| self.why_not(why))
     }
 
     /// The status line and, when there is more to say, its tooltip.
@@ -299,7 +309,30 @@ impl SlideApp {
         self.live = Some(LiveUi::new(live));
     }
 
-    /// Takes a live session the host left in [`crate::Services`], drops one whose presentation was
+    /// Ends the live session: what the room never got is kept in [`SlideApp::pending_unmerged`]
+    /// (and said), and the window leaves the room. Every way a live presentation ends comes here.
+    pub fn end_live(&mut self) {
+        let Some(lu) = self.live.take() else { return };
+        if let Some(copy) = lu.live.stop(&mut self.session) {
+            self.pending_unmerged.push(copy);
+        }
+        if !self.pending_unmerged.is_empty() {
+            self.notify(tr(deckcraft_live::UNMERGED_TEXT));
+        }
+    }
+
+    /// The window is closing for good: ends the live session and offers each copy still waiting
+    /// once. The desktop shell calls it in `on_exit`.
+    pub fn finish_live(&mut self) {
+        self.end_live();
+        let mut left = self.pending_unmerged.len();
+        while left > 0 {
+            self.offer_unmerged();
+            left -= 1;
+        }
+    }
+
+    /// Takes a live session the host left in [`crate::Services`], ends one whose presentation was
     /// closed (so this window leaves the room at once), and pumps the rest.
     pub(crate) fn pump_live(&mut self, ctx: &egui::Context) {
         if let Some(l) = self.services.live.take() {
@@ -307,38 +340,59 @@ impl SlideApp {
         }
         let Some(lu) = self.live.as_mut() else { return };
         if !lu.open(&self.session) {
-            // Closed: leave the room now, and keep what the room never got.
-            let copy = lu.live.take_unmerged().or_else(|| lu.unmerged.take());
-            self.live = None;
-            if let Some((name, bytes)) = copy {
-                self.notify(tr(deckcraft_live::UNMERGED_TEXT));
-                self.save_unmerged(&name, &bytes);
-            }
+            // Closed by a path that did not end the session: end it now and offer the copy.
+            self.end_live();
+            self.offer_unmerged();
             return;
         }
-        lu.pump(&mut self.session);
+        if let Some(copy) = lu.pump(&mut self.session) {
+            self.pending_unmerged.push(copy);
+        }
         // Edits and carets from the room arrive without input: keep frames coming.
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 
-    /// Hands the copy of unmerged edits to the person: a download on the web, a Save dialog on
-    /// the desktop.
-    pub(crate) fn save_unmerged(&mut self, name: &str, bytes: &[u8]) {
+    /// Shares what the last input changed now, so it is its own group in the room (as a command
+    /// run through [`SlideApp::run_live`] is).
+    pub(crate) fn flush_live(&mut self) {
+        let Some(lu) = self.live.as_mut().filter(|l| l.applies(&self.session)) else { return };
+        if let Some(copy) = lu.pump(&mut self.session) {
+            self.pending_unmerged.push(copy);
+        }
+    }
+
+    /// Offers the oldest waiting copy; it is dropped from the list only once the host took it.
+    pub(crate) fn offer_unmerged(&mut self) {
+        let Some((name, bytes)) = self.pending_unmerged.first().cloned() else { return };
+        if self.save_unmerged(&name, &bytes) {
+            self.pending_unmerged.remove(0);
+        }
+    }
+
+    /// Hands a copy of unmerged edits to the person: a download on the web, a Save dialog on the
+    /// desktop. True when the host took it (downloaded, or written).
+    pub(crate) fn save_unmerged(&mut self, name: &str, bytes: &[u8]) -> bool {
         if let Some(download) = self.services.download.as_mut() {
             download(name, bytes);
-            return;
+            return true;
         }
         let Some(path) = self.services.pick_save.as_mut().and_then(|pick| pick(name)) else {
             self.set_status(tr(deckcraft_live::UNMERGED_TEXT));
-            return;
+            return false;
         };
         let written = match self.services.write.as_mut() {
             Some(write) => write(&path, bytes),
             None => write_file(&path, bytes),
         };
         match written {
-            Ok(()) => self.set_status(path),
-            Err(e) => self.set_status(e),
+            Ok(()) => {
+                self.set_status(path);
+                true
+            }
+            Err(e) => {
+                self.set_status(e);
+                false
+            }
         }
     }
 
@@ -359,24 +413,47 @@ impl SlideApp {
         Some(lu.run(&mut self.session, id, params))
     }
 
-    /// A drag whose release never came (the window lost focus, the pointer was cancelled or left)
-    /// ends where it last was: Esc cannot cancel a move drag, and a drag left open would hold the
-    /// other editors' changes back (L4 concern 2, D4 review M3).
+    /// Runs an engine command for a panel or dialog: through the live session when the live
+    /// presentation is active (one shared group, refused with the reason), else on the session.
+    pub(crate) fn run_engine(&mut self, id: &str, params: &Value) -> Result<Value, String> {
+        match self.run_live(id, params) {
+            Some(r) => r,
+            None => self.session.execute(id, params).map_err(|e| e.to_string()),
+        }
+    }
+
+    /// A drag on the live presentation whose release never came (the window lost focus, the
+    /// pointer was cancelled) ends where the pointer last was: a drag left open would hold the
+    /// other editors' changes back (L4 concern 2, D4 review M3). A frame that also holds the
+    /// release is left to the canvas, which ends the drag at the release.
     pub(crate) fn end_lost_drag(&mut self, ctx: &egui::Context) {
-        if !self.session.tool.dragging() {
+        if !self.session.tool.dragging() || !self.live.as_ref().is_some_and(|l| l.applies(&self.session)) {
             return;
         }
-        let lost = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::PointerGone | egui::Event::WindowFocused(false))));
-        if !lost {
+        let (lost, released, moved) = ctx.input(|i| {
+            let lost = i.events.iter().any(|e| matches!(e, egui::Event::PointerGone | egui::Event::WindowFocused(false)));
+            let released =
+                i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { button: egui::PointerButton::Primary, pressed: false, .. }));
+            let moved = i.events.iter().rev().find_map(|e| match e {
+                egui::Event::PointerMoved(p) => Some(*p),
+                _ => None,
+            });
+            (lost, released, moved)
+        });
+        if !lost || released {
             return;
         }
-        let at = self.last_drag_at.unwrap_or_default();
+        let scale = self.canvas_scale.max(0.05);
+        let here = moved
+            .zip(self.slide_rect)
+            .map(|(p, r)| deckcraft_geom::Point::new(f64::from((p.x - r.min.x) / scale), f64::from((p.y - r.min.y) / scale)));
+        let Some(at) = here.or(self.last_drag_at) else { return };
         let ev = deckcraft_engine::PointerEvent {
             kind: deckcraft_engine::PointerKind::Up,
             x: at.x,
             y: at.y,
             mods: deckcraft_engine::Mods::default(),
-            tol: f64::from(4.0 / self.canvas_scale.max(0.05)),
+            tol: f64::from(4.0 / scale),
             pressure: None,
         };
         if let Err(e) = self.session.pointer(ev) {
@@ -403,22 +480,37 @@ enum Act {
     Follow(String),
 }
 
-/// The live strip above the status bar: status, the newest notice and the other editors.
+/// The live strip's height.
+pub(crate) const STRIP_H: f32 = 30.0;
+
+/// Whether the live strip is drawn this frame.
+pub(crate) fn strip_shown(app: &SlideApp) -> bool {
+    !app.pending_unmerged.is_empty() || app.live.as_ref().is_some_and(|l| l.applies(&app.session))
+}
+
+/// The live strip above the status bar: status, the newest notice and the other editors; and,
+/// while a copy of unmerged edits waits (also after the live presentation closed), its offer.
 pub(crate) fn status_strip(app: &mut SlideApp, ui: &mut Ui) {
-    let Some(lu) = app.live.as_mut().filter(|l| l.applies(&app.session)) else { return };
+    if !strip_shown(app) {
+        return;
+    }
+    let copy_waiting = !app.pending_unmerged.is_empty();
+    let lu = app.live.as_ref().filter(|l| l.applies(&app.session));
     let t = Tokens::get(ui.ctx());
-    let (line, tip) = lu.status_line();
-    let notice = lu.notices.last().cloned();
-    let copy_waiting = lu.unmerged.is_some();
+    let status = lu.map(LiveUi::status_line);
+    let notice = lu.and_then(|l| l.notices.last().cloned());
+    let bar = lu.map(|l| l.bar.clone());
     let mut act = None;
-    egui::Panel::bottom("live_status").exact_size(30.0).frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(10, 0))).show(
+    egui::Panel::bottom("live_status").exact_size(STRIP_H).frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(10, 0))).show(
         ui,
         |ui| {
             ui.horizontal_centered(|ui| {
-                let status = ui.add(egui::Label::new(egui::RichText::new(&line).size(12.0).color(t.text)).sense(Sense::hover()));
-                status.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &line));
-                if let Some(tip) = &tip {
-                    status.on_hover_text(tip);
+                if let Some((line, tip)) = &status {
+                    let s = ui.add(egui::Label::new(egui::RichText::new(line).size(12.0).color(t.text)).sense(Sense::hover()));
+                    s.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, line));
+                    if let Some(tip) = tip {
+                        s.on_hover_text(tip);
+                    }
                 }
                 if copy_waiting {
                     ui.add_space(16.0);
@@ -443,31 +535,32 @@ pub(crate) fn status_strip(app: &mut SlideApp, ui: &mut Ui) {
                         act = Some(Act::Dismiss);
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(id) = lu.bar.clone().badges_only().show(ui) {
-                        act = Some(Act::Follow(id));
-                    }
-                });
+                if let Some(bar) = bar {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(id) = bar.badges_only().show(ui) {
+                            act = Some(Act::Follow(id));
+                        }
+                    });
+                }
             });
         },
     );
     match act {
-        Some(Act::SaveCopy) => {
-            if let Some((name, bytes)) = lu.unmerged.take() {
-                app.save_unmerged(&name, &bytes);
-            }
-        }
+        Some(Act::SaveCopy) => app.offer_unmerged(),
         Some(Act::Restore(target)) => {
+            let Some(lu) = app.live.as_mut() else { return };
             lu.notices.pop();
             if let Err(e) = lu.restore(&mut app.session, target) {
                 app.set_status(e);
             }
         }
         Some(Act::Dismiss) => {
-            lu.notices.pop();
+            if let Some(lu) = app.live.as_mut() {
+                lu.notices.pop();
+            }
         }
         Some(Act::Follow(id)) => {
-            let Some(at) = lu.peers.iter().find(|p| p.id == id).and_then(|p| p.caret.clone()) else { return };
+            let Some(at) = app.live.as_ref().and_then(|lu| lu.peers.iter().find(|p| p.id == id)).and_then(|p| p.caret.clone()) else { return };
             if let Some(slide) = at.slide {
                 let _ = app.run("slide.go", json!({"index": slide}));
                 if !at.shapes.is_empty() {

@@ -124,6 +124,8 @@ impl SlideApp {
             ime_interrupt_pending: false,
             ime_reset: HashMap::new(),
             live,
+            pending_unmerged: Vec::new(),
+            unmerged_close_offered: false,
             last_drag_at: None,
         }
     }
@@ -253,6 +255,19 @@ impl SlideApp {
         self.capture.request_paint_if_needed(ctx, web_time::Instant::now());
         if !self.synthetic.is_empty() || !self.synthetic_next.is_empty() || self.synthetic_pending {
             ctx.request_repaint();
+        }
+        // Closing the window ends the live session first; a copy of edits the room never got is
+        // offered, and when it was not taken the window stays open once with the copy offered.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.end_live();
+            if !self.pending_unmerged.is_empty() && !self.unmerged_close_offered {
+                self.unmerged_close_offered = true;
+                self.offer_unmerged();
+                if !self.pending_unmerged.is_empty() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    self.set_status(crate::live::tr(deckcraft_live::UNMERGED_TEXT));
+                }
+            }
         }
         // Closing the window with unsaved changes asks first.
         if ctx.input(|i| i.viewport().close_requested()) && !self.quit_confirmed && self.session.documents().iter().any(|d| d.is_dirty()) {

@@ -307,7 +307,7 @@ fn compress_menu(app: &mut SlideApp, ui: &mut Ui) {
     ui.separator();
     if ui.button("Compress").clicked() {
         let p = json!({"ppi": ppi, "deleteCropped": delete_cropped, "all": !only_selected});
-        match app.session.execute("picture.compress", &p) {
+        match app.run_engine("picture.compress", &p) {
             Ok(r) => {
                 let kb = |v: &Value| v.as_u64().unwrap_or(0) / 1024;
                 let msg = match r["pictures"].as_u64().unwrap_or(0) {

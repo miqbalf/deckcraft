@@ -100,7 +100,15 @@ pub(super) fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf
     }
     let tol = (4.0 / xf.scale) as f64;
     let m = mods(ui);
-    let Some(pos) = resp.interact_pointer_pos().or(resp.hover_pos()) else { return };
+    // Where the primary button came up this frame: a touch end also loses the pointer in the same
+    // frame, so the release event is the only place left that says where the drag ended.
+    let released_at = ui.input(|i| {
+        i.events.iter().rev().find_map(|e| match e {
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, .. } => Some(*pos),
+            _ => None,
+        })
+    });
+    let Some(pos) = resp.interact_pointer_pos().or(resp.hover_pos()).or(released_at.filter(|_| app.session.tool.dragging())) else { return };
     // The rulers have their own controls; a press there mustn't reach the slide (and end text
     // editing). A drag already under way keeps going over them.
     if app.ui.ruler && !app.session.tool.dragging() && (pos.y < resp.rect.min.y + 16.0 || pos.x < resp.rect.min.x + 16.0) {
@@ -110,6 +118,10 @@ pub(super) fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf
     let pressure = reported_pressure(ui);
     let ev = |kind| PointerEvent { kind, x: p.x, y: p.y, mods: m, tol, pressure };
     let primary = ui.input(|i| i.pointer.primary_pressed());
+    // Read-only or paused live presentation: clicks select, but no gesture edits.
+    let refused = app.live_typing_refused().is_some();
+    // Where the drag was last seen before this frame.
+    let seen = app.last_drag_at;
     if app.session.tool.dragging() || primary {
         app.last_drag_at = Some(p);
     }
@@ -125,11 +137,30 @@ pub(super) fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf
     } else if resp.double_clicked() {
         app.session.pointer(ev(PointerKind::DoubleClick))
     } else if primary && resp.hovered() && !resp.secondary_clicked() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
-        app.session.pointer(ev(PointerKind::Down))
-    } else if resp.dragged_by(egui::PointerButton::Primary) || (app.session.tool.dragging() && ui.input(|i| i.pointer.primary_down())) {
+        if refused && !matches!(app.session.tool.kind, ToolKind::Select) {
+            // Drawing a shape or ink would edit: not taken while the live presentation is not.
+            Ok(serde_json::Value::Null)
+        } else {
+            let r = app.session.pointer(ev(PointerKind::Down));
+            if refused && app.session.tool.dragging() {
+                // A press on a shape or handle selects; the drag it would start is ended where it
+                // began, so nothing moves while the live presentation takes no edits.
+                let _ = app.session.pointer(ev(PointerKind::Up));
+            }
+            r
+        }
+    } else if (resp.dragged_by(egui::PointerButton::Primary) && !refused) || (app.session.tool.dragging() && ui.input(|i| i.pointer.primary_down())) {
         app.session.pointer(ev(PointerKind::Drag))
     } else if app.session.tool.dragging() && ui.input(|i| i.pointer.primary_released() || !i.pointer.primary_down()) {
-        app.session.pointer(ev(PointerKind::Up))
+        // A touch end brings the last move and the release in one frame: drag to the release
+        // point first, so the drop lands there and not where the previous frame left it.
+        let at = released_at.map_or(p, |q| xf.to_slide(q));
+        let end = |kind| PointerEvent { kind, x: at.x, y: at.y, mods: m, tol, pressure };
+        if seen == Some(at) {
+            app.session.pointer(end(PointerKind::Up))
+        } else {
+            app.session.pointer(end(PointerKind::Drag)).and_then(|_| app.session.pointer(end(PointerKind::Up)))
+        }
     } else {
         Ok(serde_json::Value::Null)
     };

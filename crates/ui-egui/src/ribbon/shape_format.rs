@@ -125,7 +125,7 @@ pub(super) fn shape_format(app: &mut SlideApp, ui: &mut Ui) {
                 run(app, "shape.change", json!({"preset": p}));
             }
             ui.separator();
-            if ui.add_enabled(enabled(app, "shape.editPoints"), egui::Button::new("Edit Points")).clicked() {
+            if crate::live::menu_button(app, ui, "Edit Points", "shape.editPoints").clicked() {
                 run(app, "shape.editPoints", json!({"on": true}));
                 ui.close();
             }

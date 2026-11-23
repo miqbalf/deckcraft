@@ -53,29 +53,34 @@ pub fn show(app: &mut SlideApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let text = toast.text.clone();
     let mut close = false;
-    egui::Area::new(egui::Id::unique("toast")).anchor(Align2::CENTER_BOTTOM, vec2(0.0, -44.0)).order(egui::Order::Foreground).show(ctx, |ui| {
-        egui::Frame::NONE
-            .fill(t.card)
-            .stroke(Stroke::new(1.0, t.card_border))
-            .corner_radius(CornerRadius::same(6))
-            .inner_margin(Margin::symmetric(14, 10))
-            .shadow(egui::epaint::Shadow { offset: [0, 2], blur: 8, spread: 0, color: t.shadow })
-            .show(ui, |ui| {
-                ui.set_max_width(520.0);
-                ui.horizontal(|ui| {
-                    ui.add(egui::Label::new(egui::RichText::new(&text).font(theme::font(13.0)).color(t.text)).wrap());
-                    let (r, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), egui::Sense::click());
-                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Close"));
-                    if resp.hovered() {
-                        ui.painter().rect_filled(r, CornerRadius::same(4), t.hover);
-                    }
-                    icons::paint(ui.painter(), r.shrink(3.0), Icon::Close, t.text_dim, false);
-                    if resp.on_hover_text("Close").clicked() {
-                        close = true;
-                    }
+    // Above the live strip when it is shown, so the toast never covers its buttons.
+    let lift = if crate::live::strip_shown(app) { crate::live::STRIP_H } else { 0.0 };
+    egui::Area::new(egui::Id::unique("toast")).anchor(Align2::CENTER_BOTTOM, vec2(0.0, -44.0 - lift)).order(egui::Order::Foreground).show(
+        ctx,
+        |ui| {
+            egui::Frame::NONE
+                .fill(t.card)
+                .stroke(Stroke::new(1.0, t.card_border))
+                .corner_radius(CornerRadius::same(6))
+                .inner_margin(Margin::symmetric(14, 10))
+                .shadow(egui::epaint::Shadow { offset: [0, 2], blur: 8, spread: 0, color: t.shadow })
+                .show(ui, |ui| {
+                    ui.set_max_width(520.0);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(&text).font(theme::font(13.0)).color(t.text)).wrap());
+                        let (r, resp) = ui.allocate_exact_size(vec2(20.0, 20.0), egui::Sense::click());
+                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Close"));
+                        if resp.hovered() {
+                            ui.painter().rect_filled(r, CornerRadius::same(4), t.hover);
+                        }
+                        icons::paint(ui.painter(), r.shrink(3.0), Icon::Close, t.text_dim, false);
+                        if resp.on_hover_text("Close").clicked() {
+                            close = true;
+                        }
+                    });
                 });
-            });
-    });
+        },
+    );
     if close {
         app.toast = None;
     } else {

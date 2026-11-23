@@ -51,6 +51,8 @@ impl eframe::App for App {
     }
     fn on_exit(&mut self) {
         save_prefs(&self.0);
+        // A live session leaves the room, and a copy of edits it never got is offered.
+        self.0.finish_live();
         // The window is closing for good: a ready update's helper starts now and installs it once
         // the process has exited.
         self.0.start_pending_update();
