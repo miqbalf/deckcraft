@@ -237,3 +237,32 @@ fn closing_while_live_right_after_an_edit_keeps_no_copy() {
     }
     assert!(text_of(&r, 1, a).contains("quick"), "the edit reached the room");
 }
+
+/// The link drops after the last pump and the person types and closes before the next one: the
+/// status still says Live, but the edit never left, so it comes back as the copy (re-review 2 I2).
+#[test]
+fn closing_right_after_the_link_dropped_keeps_the_edit() {
+    let mut r = Room::new(basic(), 2, 20);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.drop_link(0);
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit");
+    r.peers[0].run("text.insert", json!({"text": "dropped "})).expect("type");
+    r.peers[0].run("file.close", json!({})).expect("close");
+    let (_, bytes) = r.peers[0].live.take_unmerged().expect("the copy");
+    assert!(copy_text(&bytes, a).contains("dropped"), "the copy holds the text");
+    assert!(r.peers[0].notices.iter().any(|n| n.text == UNMERGED_TEXT), "told");
+}
+
+/// The same window, ended by stop(): stop returns the copy.
+#[test]
+fn stopping_right_after_the_link_dropped_returns_the_edit() {
+    let mut r = Room::new(basic(), 2, 21);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.drop_link(0);
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit");
+    r.peers[0].run("text.insert", json!({"text": "dropped "})).expect("type");
+    let p = r.peers.remove(0);
+    let (live, mut session) = (p.live, p.session);
+    let (_, bytes) = live.stop(&mut session).expect("stop returns the copy");
+    assert!(copy_text(&bytes, a).contains("dropped"), "the copy holds the text");
+}
