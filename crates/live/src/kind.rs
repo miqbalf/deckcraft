@@ -47,7 +47,7 @@ pub struct CaretPos {
 
 /// Another editor's selection as the mapping keeps it between edits: by stable id, with its text
 /// caret as sticky indexes (L7). It is resolved to a [`DeckPos`] against this window's deck at each
-/// pump; what this window does not have yet is not drawn, and what is deleted is dropped.
+/// pump; what this window does not have is not drawn, and a deleted slide drops the caret.
 #[derive(Clone, Debug)]
 pub struct DeckCaret {
     pub slide: SlideId,

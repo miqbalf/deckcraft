@@ -97,6 +97,16 @@ pub(crate) struct Mapping {
 }
 
 impl Mapping {
+    /// The texts whose remote change waits (for the carets' scene, L7 review M2).
+    pub(crate) fn held_texts(&self) -> crate::presence::Held {
+        crate::presence::Held {
+            shapes: self.held.shapes.clone(),
+            slides: self.held.slides.clone(),
+            whole: self.held.whole.clone(),
+            all: self.resync_wanted,
+        }
+    }
+
     /// Keep `state` (a replica's state with local edits the room lacks) for the unmerged copy.
     /// A copy still waiting is merged with it, never replaced: after a reset the replica no longer
     /// holds the earlier edits (L5 review I1). The person is told when a copy starts waiting.
@@ -197,9 +207,10 @@ impl DeckApp<'_> {
         self.session.documents().iter().find(|d| d.uid == self.map.doc)
     }
 
-    /// The carets' scene gets the engine's deck as it is now.
+    /// The carets' scene gets the engine's deck and what is held as they are now.
     fn see(&self) {
         self.map.scene.set_deck(self.current().map(|d| d.doc.clone()));
+        self.map.scene.set_held(self.map.held_texts());
     }
 
     /// Whether this window's selection or caret is in `t`: a selected shape or the text caret

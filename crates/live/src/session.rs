@@ -228,8 +228,10 @@ impl<H: Hub> DeckLive<H> {
         let now = self.now();
         self.end_stale_twist(session, now);
         // What landed after the last pump (held changes, the touched slides) is where the other
-        // editors' carets are drawn from now on.
+        // editors' carets are drawn from now on; my caret's sticky indexes are taken for where it
+        // is now, in case it moved without an edit (L7 review M6).
         self.see(session);
+        self.keep_mine(session);
         let peers = {
             let mut app = DeckApp { session, map: &mut self.map, now };
             self.core.pump(&mut app)
@@ -278,6 +280,7 @@ impl<H: Hub> DeckLive<H> {
         let st = session.documents().iter().find(|d| d.uid == self.map.doc);
         self.map.scene.set_deck(st.map(|d| d.doc.clone()));
         self.map.scene.set_view(self.core.live().doc().map(DeckDoc::view));
+        self.map.scene.set_held(self.map.held_texts());
     }
 
     /// This window's text caret as sticky indexes, taken again when it moved or the text
@@ -438,7 +441,7 @@ impl<H: Hub> DeckLive<H> {
     /// indexes ([`crate::presence`]; held to five a second). A read-only window sends it too.
     pub fn send_selection(&mut self, session: &Session) {
         let Some(st) = session.documents().iter().find(|d| d.uid == self.map.doc) else { return };
-        if let Some(p) = crate::presence::payload(st, self.core.live().doc()) {
+        if let Some(p) = crate::presence::payload_with(st, self.core.live().doc(), self.map.mine.as_ref()) {
             self.core.send_presence(p);
         }
     }
