@@ -337,3 +337,180 @@ fn a_remote_change_never_lands_inside_a_drop_or_commit_report() {
     assert!(Arc::ptr_eq(&got[0].before, &before) && Arc::ptr_eq(&got[0].after, &committed));
     assert!(got[0].after.slides[0].name == before.slides[0].name, "the commit holds none of the remote change");
 }
+
+/// The slide list with shape `id` on the current slide changed by `f`, as someone else changed it.
+fn with_shape(p: &Presentation, slide: SlideId, id: ShapeId, f: impl FnOnce(&mut deckcraft_engine::model::Shape)) -> Vec<Arc<Slide>> {
+    reordered(p, |v| {
+        if let Some(i) = v.iter().position(|s| s.id == slide) {
+            let mut sl = (*v[i]).clone();
+            if let Some(sh) = deckcraft_engine::model::find_shape_mut(&mut sl.shapes, id) {
+                f(sh);
+            }
+            v[i] = Arc::new(sl);
+        }
+    })
+}
+
+/// D4 review M1: a connector inside a group glued to the deleted shape loses that end, the same
+/// way for a local and a remote delete.
+#[test]
+fn a_connector_inside_a_group_loses_its_end_alike_for_a_local_and_a_remote_delete() {
+    let mut a = Session::with_new();
+    let target = insert(&mut a, 100.0, 100.0);
+    let partner = insert(&mut a, 400.0, 300.0);
+    let line = a.execute("shape.connect", &json!({"from": partner, "to": target})).expect("connect")["id"].as_u64().expect("connector id");
+    a.execute("arrange.group", &json!({"ids": [line, partner]})).expect("group");
+    a.execute("edit.deselect", &json!({})).expect("deselect");
+    let slide = current_slide_id(&a);
+    let (id, line) = (ShapeId(target as u32), ShapeId(line as u32));
+    let in_group =
+        |p: &Presentation| p.slide(slide).is_some_and(|s| s.shapes.iter().any(|g| g.is_group() && g.children().iter().any(|x| x.id == line)));
+    assert!(in_group(&doc(&a)), "the connector sits inside the group");
+    assert!(mentions(&doc(&a), slide, id) >= 1, "the connector is glued to the target");
+
+    let mut b = Session::new();
+    b.add_document(a.active().expect("doc").clone());
+    let ub = uid(&b);
+    a.execute("edit.delete", &json!({"ids": [target]})).expect("local delete");
+    b.apply_remote(ub, |ctx| ctx.delete_shapes(slide, &[id]).map(|_| ())).expect("remote delete");
+    let (pa, pb) = (doc(&a), doc(&b));
+    assert_eq!(mentions(&pa, slide, id), 0, "the connector no longer names the deleted shape");
+    assert!(pa.slide(slide).is_some_and(|s| s.shape(line).is_some()), "the connector itself stays");
+    assert!(*pa == *pb, "a remote delete leaves the deck as a local delete does");
+}
+
+/// D4 review M4: a press with no drag yet already holds a remote change off.
+#[test]
+fn a_press_alone_holds_a_remote_change() {
+    let mut s = Session::with_new();
+    insert(&mut s, 100.0, 100.0);
+    s.execute("edit.deselect", &json!({})).expect("deselect");
+    let u = uid(&s);
+    s.pointer(ev(PointerKind::Down, 140.0, 130.0)).expect("down");
+    assert!(s.remote_busy(u), "a press is a gesture in progress");
+    let during = doc(&s);
+    assert!(matches!(rename_first_slide(&mut s, u), Err(EngineError::RemoteBusy)));
+    assert!(Arc::ptr_eq(&during, &doc(&s)), "the document is unchanged");
+    s.pointer(ev(PointerKind::Up, 140.0, 130.0)).expect("up");
+    assert!(!s.remote_busy(u));
+    rename_first_slide(&mut s, u).expect("after the release");
+}
+
+/// D4 review M4: a reset waits for a composition as a remote change does.
+#[test]
+fn a_quiet_replace_is_refused_during_a_composition() {
+    let mut s = Session::with_new();
+    let id = insert(&mut s, 100.0, 100.0);
+    let u = uid(&s);
+    s.execute("text.edit", &json!({"id": id})).expect("edit");
+    s.compose_text("k", None).expect("compose");
+    assert!(s.remote_busy(u));
+    let during = doc(&s);
+    let mut p = (*during).clone();
+    p.slides.reverse();
+    assert!(matches!(s.replace_presentation_quiet(u, p), Err(EngineError::RemoteBusy)));
+    assert!(Arc::ptr_eq(&during, &doc(&s)), "the document is unchanged");
+}
+
+/// D4 review M4: a remote change that shortens the text being edited keeps the caret inside it,
+/// and a caret the live layer places wins over that clamp.
+#[test]
+fn a_shortened_text_clamps_the_caret_and_set_text_wins() {
+    let mut s = Session::with_new();
+    let id = insert(&mut s, 100.0, 100.0);
+    let shape = ShapeId(id as u32);
+    let u = uid(&s);
+    s.execute("text.edit", &json!({"id": id})).expect("edit");
+    s.execute("text.insert", &json!({"text": "Hello world"})).expect("type");
+    let slide = current_slide_id(&s);
+    let caret = |s: &Session| s.active().and_then(|d| d.selection.text.clone()).expect("a caret");
+    assert!(caret(&s).caret.1 > 2, "the caret is past what will be left");
+    s.apply_remote(u, |ctx| {
+        let slides = with_shape(ctx.presentation(), slide, shape, |sh| sh.text = Some(deckcraft_engine::model::text::TextBody::from_text("Hi")));
+        ctx.set_slides(slides);
+        Ok(())
+    })
+    .expect("shorten");
+    let c = caret(&s);
+    assert!(c.caret.1 <= 2 && c.anchor.1 <= 2, "the caret is kept inside the shorter text");
+    s.apply_remote(u, |ctx| {
+        let slides = with_shape(ctx.presentation(), slide, shape, |sh| sh.text = Some(deckcraft_engine::model::text::TextBody::from_text("Hey")));
+        ctx.set_slides(slides);
+        ctx.set_text(Some(deckcraft_engine::TextSel { anchor: (0, 1), caret: (0, 1), ..c.clone() }));
+        Ok(())
+    })
+    .expect("placed");
+    assert!(caret(&s).caret == (0, 1), "the placed caret wins");
+}
+
+/// D4 review M4: a panic inside a remote change is caught and the document is left as it was.
+#[test]
+fn a_panicking_remote_change_leaves_the_document_as_before() {
+    let (mut s, _) = deck(3, 1);
+    let u = uid(&s);
+    let before = doc(&s);
+    let r: Result<(), _> = s.apply_remote(u, |ctx| {
+        let slides = reordered(ctx.presentation(), |v| v.reverse());
+        ctx.set_slides(slides);
+        panic!("the replica was unreadable");
+    });
+    assert!(r.is_err(), "the panic is an error");
+    assert!(Arc::ptr_eq(&before, &doc(&s)), "the same presentation");
+}
+
+/// D4 review M2: a remote change that takes rows and columns keeps a cell caret and a selected
+/// cell range inside the table.
+#[test]
+fn a_smaller_table_clamps_the_cell_caret_and_range() {
+    let mut s = Session::with_new();
+    let id = s.execute("insert.table", &json!({"rows": 3, "cols": 3})).expect("table")["id"].as_u64().expect("table id");
+    let table = ShapeId(id as u32);
+    let u = uid(&s);
+    s.execute("text.edit", &json!({"id": id, "cell": [2, 2]})).expect("edit the last cell");
+    s.execute("text.insert", &json!({"text": "corner"})).expect("type");
+    let slide = current_slide_id(&s);
+    s.apply_remote(u, |ctx| {
+        let slides = with_shape(ctx.presentation(), slide, table, |sh| {
+            if let ShapeKind::Table(t) = &mut sh.kind {
+                t.delete_row(2);
+                t.delete_col(2);
+            }
+        });
+        ctx.set_slides(slides);
+        Ok(())
+    })
+    .expect("shrink");
+    let st = s.active().expect("doc");
+    let t = st.selection.text.clone().expect("still editing");
+    let (r, c) = t.cell.expect("in a cell");
+    assert!(r < 2 && c < 2, "the cell caret is inside the smaller table");
+    if let Some((_, a, b)) = st.selection.cells {
+        assert!(a.0 < 2 && a.1 < 2 && b.0 < 2 && b.1 < 2, "the selected range is inside the smaller table");
+    }
+}
+
+/// D4 review M2: a selected cell range is kept inside a table that lost rows and columns.
+#[test]
+fn a_smaller_table_clamps_the_selected_cells() {
+    let mut s = Session::with_new();
+    let id = s.execute("insert.table", &json!({"rows": 3, "cols": 3})).expect("table")["id"].as_u64().expect("table id");
+    let table = ShapeId(id as u32);
+    let u = uid(&s);
+    s.execute("edit.select", &json!({"ids": [id]})).expect("select");
+    s.execute("table.selectCells", &json!({"from": [0, 0], "to": [2, 2]})).expect("select cells");
+    assert!(s.active().and_then(|d| d.selection.cells).is_some(), "a cell range is selected");
+    let slide = current_slide_id(&s);
+    s.apply_remote(u, |ctx| {
+        let slides = with_shape(ctx.presentation(), slide, table, |sh| {
+            if let ShapeKind::Table(t) = &mut sh.kind {
+                t.delete_row(2);
+                t.delete_col(2);
+            }
+        });
+        ctx.set_slides(slides);
+        Ok(())
+    })
+    .expect("shrink");
+    let (_, a, b) = s.active().and_then(|d| d.selection.cells).expect("the range stays");
+    assert!(a.0 < 2 && a.1 < 2 && b.0 < 2 && b.1 < 2, "the selected range is inside the smaller table");
+}

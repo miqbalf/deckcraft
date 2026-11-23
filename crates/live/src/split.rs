@@ -87,10 +87,15 @@ impl PlannedWrite {
     }
 
     /// Estimated encoded size.
-    fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         let json = |v: &dyn erased::Json| v.len() * 2;
         match self {
-            PlannedWrite::PutSlide { slide, pos } => KEY_COST * 12 + pos.len() + json(slide.as_ref()),
+            // What `put_slide` writes: the slide's own keys and its notes; its shapes are
+            // `PutShape` writes of their own.
+            PlannedWrite::PutSlide { slide, pos } => {
+                let keys: usize = crate::doc::slide_values(slide).iter().map(|(k, v)| KEY_COST + k.len() + json(v)).sum();
+                KEY_COST * 4 + pos.len() + keys + json(&slide.notes.paragraphs)
+            }
             PlannedWrite::SetSlide { key, value, .. } | PlannedWrite::SetShape { key, value, .. } => KEY_COST + key.len() + json(value),
             // What `put_shape` writes: the entry's own keys (a group's without its children) and
             // the text body.

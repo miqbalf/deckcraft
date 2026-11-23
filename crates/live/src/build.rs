@@ -1,7 +1,7 @@
 //! The deck a replica describes: the base plus every entry, tombstoned shapes removed through
-//! the one delete routine (Ruling D7). The oracle of the tests and the worker's save.
+//! the engine's one delete routine (Ruling D7). The oracle of the tests and the worker's save.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use craft_collab::{LiveError, Replica};
@@ -52,48 +52,97 @@ impl<'a> Base<'a> {
 ///
 /// `next_id` stays the base's: ids minted live sit at or above `LIVE_ID_BASE` and are never
 /// counted into it, so a block-less session over the result keeps minting below the live range.
+/// Tombstoned shapes are removed with the engine's own delete routine (Ruling D7), as a local
+/// `edit.delete` and a remote delete remove them.
 #[must_use]
 pub fn deck_from_doc(base: &Presentation, doc: &DeckDoc) -> Presentation {
     let mut out = base.clone();
-    let b = Base::of(base);
-    // The entries with junk core keys put back to the base's.
-    let mut order = Vec::new();
-    for (id, e) in doc.slide_entries() {
-        let junk = doc.slide_junk(*id);
-        let bad = |k: &str| junk.is_some_and(|j| j.contains(k));
-        let del = e.del && !bad(DEL);
-        let pos = if bad(POS) { b.slides.get(id).map(|(_, p)| p.clone()).unwrap_or_default() } else { e.pos.clone() };
-        if !del {
-            order.push((*id, pos));
-        }
-    }
-    let mut shapes: BTreeMap<ShapeId, ShapeEntry> = BTreeMap::new();
-    for (id, e) in doc.shape_entries() {
-        let mut e = e.clone();
-        if let Some(junk) = doc.shape_junk(*id) {
-            let placed = b.shapes.get(id).map(|(_, p)| p);
-            if junk.contains(SLIDE) {
-                e.slide = placed.map_or(SlideId(0), |p| p.0);
-            }
-            if junk.contains(PARENT) {
-                e.parent = placed.and_then(|p| p.1);
-            }
-            if junk.contains(Z) {
-                e.z = placed.map(|p| p.2.clone()).unwrap_or_default();
-            }
-            if junk.contains(DEL) {
-                e.del = false;
-            }
-        }
-        shapes.insert(*id, e);
-    }
+    let r = Rebuild::new(base, doc);
+    let order = r.order();
+    let all: BTreeSet<SlideId> = order.iter().copied().collect();
+    let shapes = r.entries_on(&all);
     let mut slides = Vec::new();
     let mut tombs = Vec::new();
-    for id in crate::order::order(order) {
-        let Some(e) = doc.slide(id) else { continue };
+    for id in order {
+        let Some((slide, dead)) = r.slide(id, &shapes) else { continue };
+        tombs.push(dead);
+        slides.push(slide);
+    }
+    out.slides = slides;
+    for (i, dead) in tombs.into_iter().enumerate() {
+        if !dead.is_empty() {
+            deckcraft_engine::delete_shapes_in(&mut out, i, &dead);
+        }
+    }
+    out
+}
+
+/// The pieces of [`deck_from_doc`], so a remote change can rebuild only the slides it touched.
+pub(crate) struct Rebuild<'a> {
+    b: Base<'a>,
+    doc: &'a DeckDoc,
+}
+
+impl<'a> Rebuild<'a> {
+    pub(crate) fn new(base: &'a Presentation, doc: &'a DeckDoc) -> Rebuild<'a> {
+        Rebuild { b: Base::of(base), doc }
+    }
+
+    /// The live slides in order, a junk `pos` read as the base's and a junk `del` as false.
+    pub(crate) fn order(&self) -> Vec<SlideId> {
+        let mut order = Vec::new();
+        for (id, e) in self.doc.slide_entries() {
+            let junk = self.doc.slide_junk(*id);
+            let bad = |k: &str| junk.is_some_and(|j| j.contains(k));
+            let del = e.del && !bad(DEL);
+            let pos = if bad(POS) { self.b.slides.get(id).map(|(_, p)| p.clone()).unwrap_or_default() } else { e.pos.clone() };
+            if !del {
+                order.push((*id, pos));
+            }
+        }
+        crate::order::order(order)
+    }
+
+    /// The slide a shape entry is on, a junk `slide` read as the base's.
+    fn slide_of(&self, id: ShapeId, e: &ShapeEntry) -> SlideId {
+        if self.doc.shape_junk(id).is_some_and(|j| j.contains(SLIDE)) { self.b.shapes.get(&id).map_or(SlideId(0), |(_, p)| p.0) } else { e.slide }
+    }
+
+    /// The shape entries on `slides`, with junk core keys put back to the base's.
+    pub(crate) fn entries_on(&self, slides: &BTreeSet<SlideId>) -> BTreeMap<ShapeId, ShapeEntry> {
+        let mut shapes: BTreeMap<ShapeId, ShapeEntry> = BTreeMap::new();
+        for (id, e) in self.doc.shape_entries() {
+            let slide = self.slide_of(*id, e);
+            if !slides.contains(&slide) {
+                continue;
+            }
+            let mut e = e.clone();
+            e.slide = slide;
+            if let Some(junk) = self.doc.shape_junk(*id) {
+                let placed = self.b.shapes.get(id).map(|(_, p)| p);
+                if junk.contains(PARENT) {
+                    e.parent = placed.and_then(|p| p.1);
+                }
+                if junk.contains(Z) {
+                    e.z = placed.map(|p| p.2.clone()).unwrap_or_default();
+                }
+                if junk.contains(DEL) {
+                    e.del = false;
+                }
+            }
+            shapes.insert(*id, e);
+        }
+        shapes
+    }
+
+    /// Slide `id` as the replica describes it, its tombstoned shapes still in it, and those ids.
+    /// An unchanged slide is the base's own `Arc`. None for a slide with no entry.
+    pub(crate) fn slide(&self, id: SlideId, shapes: &BTreeMap<ShapeId, ShapeEntry>) -> Option<(Arc<Slide>, Vec<ShapeId>)> {
+        let e = self.doc.slide(id)?;
+        let b = &self.b;
         let earlier = b.slides.get(&id).map(|(s, _)| s.as_ref());
         let mut slide = earlier.cloned().unwrap_or_else(|| Slide { id, ..Default::default() });
-        if !doc.slide_junk(id).is_some_and(|j| j.contains(LAYOUT)) {
+        if !self.doc.slide_junk(id).is_some_and(|j| j.contains(LAYOUT)) {
             slide.layout = e.layout;
         } else if earlier.is_none() {
             slide.layout = LayoutId(0);
@@ -101,25 +150,23 @@ pub fn deck_from_doc(base: &Presentation, doc: &DeckDoc) -> Presentation {
         for (k, v) in &e.fields {
             apply_slide_field(&mut slide, k, v);
         }
-        if let Some(ps) = doc.text(TextTarget::Notes(id)) {
-            slide.notes.paragraphs = keep_base(&slide.notes.paragraphs, ps);
+        if let Some(ps) = self.doc.text(TextTarget::Notes(id)) {
+            let kept = keep_base(&slide.notes.paragraphs, ps);
+            // Notes typed live need a notes slide to be saved in; an unchanged body keeps the
+            // base's flag.
+            if kept != slide.notes.paragraphs && kept.iter().any(|p| !p.is_empty()) {
+                slide.has_notes_slide = true;
+            }
+            slide.notes.paragraphs = kept;
         }
-        let (built, dead) = build_tree(doc, &shapes, id, &b);
+        let (built, dead) = build_tree(self.doc, shapes, id, b);
         slide.shapes = built;
-        tombs.push(dead);
         let slide = match b.slides.get(&id) {
             Some((s, _)) if s.as_ref() == &slide => Arc::clone(s),
             _ => Arc::new(slide),
         };
-        slides.push(slide);
+        Some((slide, dead))
     }
-    out.slides = slides;
-    for (i, dead) in tombs.into_iter().enumerate() {
-        if !dead.is_empty() {
-            delete_shapes_in(&mut out, i, &dead);
-        }
-    }
-    out
 }
 
 /// The base's own paragraphs when the replica holds them unchanged (a YText keeps only the
@@ -181,58 +228,4 @@ fn build_shape(doc: &DeckDoc, shapes: &BTreeMap<ShapeId, ShapeEntry>, kids: &Kid
         *children = if depth < 64 { build_level(doc, shapes, kids, Some(id), base, depth + 1) } else { Vec::new() };
     }
     Some(s)
-}
-
-/// A copy of D4's `delete_shapes_in` (frozen signature) until it lands in the engine; L4 removes
-/// it at its merge. It removes `ids` from slide `slide` as `edit.delete` does: empty groups go too;
-/// animations of a gone shape go and effects it triggered fall back to the main sequence;
-/// connector ends glued to a gone shape come loose. It does not refit groups or reroute
-/// connectors (the engine's routine does). Returns every id that is gone.
-pub fn delete_shapes_in(doc: &mut Presentation, slide: usize, ids: &[ShapeId]) -> Vec<ShapeId> {
-    let Some(sl) = doc.slides.get_mut(slide) else { return Vec::new() };
-    let sl = Arc::make_mut(sl);
-    let mut before = Vec::new();
-    deckcraft_model::walk(&sl.shapes, &mut |s, _| before.push(s.id));
-    remove(&mut sl.shapes, ids, 0);
-    let mut left = std::collections::HashSet::new();
-    deckcraft_model::walk(&sl.shapes, &mut |s, _| {
-        left.insert(s.id);
-    });
-    let gone: Vec<ShapeId> = before.into_iter().filter(|i| !left.contains(i)).collect();
-    sl.animations.retain(|a| !gone.contains(&a.shape));
-    for a in sl.animations.iter_mut().filter(|a| a.trigger.is_some_and(|t| gone.contains(&t))) {
-        a.trigger = None;
-    }
-    loosen(&mut sl.shapes, &gone, 0);
-    gone
-}
-
-fn remove(v: &mut Vec<Shape>, ids: &[ShapeId], depth: usize) {
-    v.retain(|s| !ids.contains(&s.id));
-    if depth > 64 {
-        return;
-    }
-    for s in v.iter_mut() {
-        if let Some(ch) = s.children_mut() {
-            remove(ch, ids, depth + 1);
-        }
-    }
-    v.retain(|s| !s.is_group() || !s.children().is_empty());
-}
-
-fn loosen(v: &mut [Shape], gone: &[ShapeId], depth: usize) {
-    for s in v.iter_mut() {
-        if let ShapeKind::Connector { start, end } = &mut s.kind {
-            for e in [start, end] {
-                if e.is_some_and(|(id, _)| gone.contains(&id)) {
-                    *e = None;
-                }
-            }
-        }
-        if depth < 64
-            && let Some(ch) = s.children_mut()
-        {
-            loosen(ch, gone, depth + 1);
-        }
-    }
 }

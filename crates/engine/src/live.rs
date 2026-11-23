@@ -27,7 +27,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use deckcraft_model::{Presentation, ShapeId, Slide, SlideId};
+use deckcraft_model::{Presentation, ShapeId, ShapeKind, Slide, SlideId};
 
 use crate::{DocState, EngineError, Result, Session, TextSel};
 
@@ -308,6 +308,17 @@ impl Session {
         if cells_gone {
             st.selection.cells = None;
         }
+        // A remote change may have taken rows or columns: keep a cell range inside its table.
+        if let Some((id, a, b)) = st.selection.cells {
+            let size = st.shape(id).and_then(|s| if let ShapeKind::Table(t) = &s.kind { Some((t.n_rows(), t.n_cols())) } else { None });
+            st.selection.cells = match size {
+                Some((r, c)) if r > 0 && c > 0 => {
+                    let fit = |(x, y): (usize, usize)| (x.min(r - 1), y.min(c - 1));
+                    Some((id, fit(a), fit(b)))
+                }
+                _ => None,
+            };
+        }
         st.revision += 1;
         self.live_absorb(uid);
     }
@@ -347,15 +358,23 @@ impl RemoteCtx<'_> {
 }
 
 /// Keep a caret the live layer did not place inside its text: a remote change may have
-/// shortened it.
+/// shortened it, or taken the table row or column it was in.
 fn clamp_caret(slide: Option<&Slide>, t: &mut TextSel) {
-    if t.cell.is_some() {
-        return;
-    }
+    let shape = slide.and_then(|s| deckcraft_model::find_shape(&s.shapes, t.shape));
     let body = if t.notes {
         slide.map(|s| &s.notes)
+    } else if let Some((r, c)) = t.cell {
+        // A table cell's caret: the cell kept inside the table (a remote change may have taken
+        // rows or columns), then the caret inside the cell's text.
+        let Some(ShapeKind::Table(table)) = shape.map(|s| &s.kind) else { return };
+        if table.n_rows() == 0 || table.n_cols() == 0 {
+            return;
+        }
+        let cell = (r.min(table.n_rows() - 1), c.min(table.n_cols() - 1));
+        t.cell = Some(cell);
+        table.cell(cell.0, cell.1).map(|x| &x.text)
     } else {
-        slide.and_then(|s| deckcraft_model::find_shape(&s.shapes, t.shape)).and_then(|s| s.text.as_ref())
+        shape.and_then(|s| s.text.as_ref())
     };
     let Some(body) = body else { return };
     let fit = |(p, c): (usize, usize)| {

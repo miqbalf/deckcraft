@@ -1,0 +1,400 @@
+//! [`DeckLive`]: a DeckCraft presentation in a live room. It owns the `craft-live` link, the
+//! mapping between the engine and the room's document and the command gate; the host owns the
+//! engine [`Session`] and passes it to each call.
+
+use std::sync::{Arc, Mutex, PoisonError};
+
+use craft_collab::{Hub, LiveError, Replica};
+use craft_live::{Access, LiveEditing, LiveStatus, Peer as LivePeer};
+use deckcraft_engine::{Edited, Session};
+use deckcraft_model::Presentation;
+use serde_json::{Value, json};
+
+use crate::app::{DeckApp, Mapping, SentGroup, caret_payload};
+use crate::doc::{DeckDoc, DeckSeed, Tomb};
+use crate::gate::{Class, MEDIA_TEXT, NOT_YET_TEXT, class};
+use crate::kind::{Deck, DeckEdit, DeckPos};
+use crate::remote::Targets;
+use crate::schema::MAX_SEED_BYTES;
+use crate::seed::base_sha256;
+
+/// Another editor, with the selection as the host draws it.
+pub type Peer = LivePeer<DeckPos>;
+
+/// Why a minting command is refused once this peer's id block is used up.
+pub const NO_SPACE_TEXT: &str = "Reopen the file to keep adding shapes";
+/// Why a presentation over the seed limit opens for one person (Ruling D9).
+pub const TOO_LARGE_TEXT: &str = "This presentation is too large to edit live. It is open for you alone.";
+/// Why a shared command is not taken now: the link is not live, or the ticket is read-only.
+pub const PAUSED_TEXT: &str = "Editing is paused until the link to the other editors is back";
+/// Why nothing can be edited with a read-only ticket.
+pub const READ_ONLY_TEXT: &str = "This file is read-only for you.";
+
+/// How long a remote change may wait for a twist whose end never came before it is ended
+/// (D4 review M3), in ms; without a clock, in pumps.
+const HOLD_BUDGET_MS: f64 = 10_000.0;
+const HOLD_BUDGET_PUMPS: f64 = 600.0;
+
+/// The base file every peer of the room opens.
+pub struct BaseFile<'a> {
+    pub bytes: &'a [u8],
+    /// The file's name; only `.pptx` is edited live (Ruling D13).
+    pub name: &'a str,
+    /// The hash the room says the base has; checked before anything is opened.
+    pub expected_sha256: Option<[u8; 32]>,
+}
+
+/// Why a session did not start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveFail {
+    /// The base did not open as a presentation (or is not a `.pptx`).
+    Open(String),
+    /// The base bytes are not the file the room was opened on.
+    BaseMismatch,
+    /// The presentation is over the seed limit: it is open in the session for one person
+    /// ([`TOO_LARGE_TEXT`]).
+    TooLarge,
+    Live(LiveError),
+}
+
+impl std::fmt::Display for LiveFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LiveFail::Open(e) => write!(f, "{e}"),
+            LiveFail::BaseMismatch => write!(f, "the file is not the one the live session was opened on"),
+            LiveFail::TooLarge => write!(f, "{TOO_LARGE_TEXT}"),
+            LiveFail::Live(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// A line for the person, with a Restore action when it is about something deleted (L5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Notice {
+    pub text: String,
+    pub restore: Option<Tomb>,
+}
+
+type Clock = Box<dyn FnMut() -> f64 + Send>;
+
+/// A DeckCraft presentation edited live. Holds `LiveEditing<H, Deck>` directly, so the worker
+/// uses it as it is (Ruling D3).
+pub struct DeckLive<H: Hub> {
+    core: LiveEditing<H, Deck>,
+    map: Mapping,
+    clock: Arc<Mutex<Option<Clock>>>,
+    pumps: f64,
+    resync_told: bool,
+}
+
+impl<H: Hub> DeckLive<H> {
+    /// Opens `base` as the session's document with the reader `file.open` uses, checks its sha256,
+    /// refuses a presentation over [`MAX_SEED_BYTES`] (it stays open for one person), installs the
+    /// edit observer and the live undo hook (bound to this document, before any remote change
+    /// lands), and seeds the replica. The id block is set when the relay grants a space.
+    ///
+    /// # Errors
+    /// [`LiveFail`].
+    pub fn start(hub: H, room: &str, base: &BaseFile, access: Access, uid: &str, session: &mut Session) -> Result<Self, LiveFail> {
+        let sha = base_sha256(base.bytes);
+        if base.expected_sha256.is_some_and(|want| want != sha) {
+            return Err(LiveFail::BaseMismatch);
+        }
+        if !base.name.to_ascii_lowercase().ends_with(".pptx") {
+            return Err(LiveFail::Open("only .pptx files are edited live".into()));
+        }
+        let deck = deckcraft_engine::cmd::file::open_presentation(base.name, base.bytes).map_err(|e| LiveFail::Open(e.to_string()))?;
+        let deck = Arc::new(deck);
+        let seed = DeckSeed::new(base.bytes, deck.clone());
+        let replica = DeckDoc::seeded(&seed).map_err(LiveFail::Live)?;
+        let too_large = replica.seed_bytes() > MAX_SEED_BYTES;
+        drop(replica);
+        let name = std::path::Path::new(base.name).file_name().map_or_else(|| base.name.to_owned(), |n| n.to_string_lossy().into_owned());
+        let i = deckcraft_engine::cmd::file::add_opened(session, &name, None, (*deck).clone());
+        if too_large {
+            return Err(LiveFail::TooLarge);
+        }
+        let doc = session.documents().get(i).map(|d| d.uid).ok_or_else(|| LiveFail::Open("the presentation did not open".into()))?;
+        let core = match LiveEditing::<H, Deck>::start(hub, room, &seed, access) {
+            Ok(c) => c,
+            Err(e) => {
+                session.close_document(i);
+                return Err(LiveFail::Live(e));
+            }
+        };
+        let map = Mapping {
+            doc,
+            base: deck,
+            uid: uid.to_owned(),
+            space: 0,
+            block: None,
+            held: Targets::default(),
+            held_since: None,
+            resync_wanted: false,
+            touched: Targets::default(),
+            partial: false,
+            refused: None,
+            notices: Vec::new(),
+            sent: Vec::new(),
+        };
+        let mut live = DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false };
+        if live.clock.lock().unwrap_or_else(PoisonError::into_inner).is_some() {
+            live.share_clock();
+        }
+        live.bind(session);
+        Ok(live)
+    }
+
+    /// The edit observer and the live undo hook, together, and the engine's own history cleared
+    /// (D4 review I-1: its snapshots would bring back a deck without the peers' changes).
+    fn bind(&mut self, session: &mut Session) {
+        let q = self.core.queue();
+        session.set_edit_observer(self.map.doc, Some(Box::new(move |e: Edited| q.push(DeckEdit::Command(Box::new(e))))));
+        let q = self.core.queue();
+        session.set_live_undo_hook(
+            self.map.doc,
+            Some(Box::new(move |redo| {
+                q.push(if redo { DeckEdit::Redo } else { DeckEdit::Undo });
+                true
+            })),
+        );
+        self.clear_history(session);
+    }
+
+    fn clear_history(&self, session: &mut Session) {
+        if let Some(st) = session.document_mut(self.map.doc) {
+            st.history.undo.clear();
+            st.history.redo.clear();
+            st.history.costs.clear();
+        }
+    }
+
+    fn share_clock(&mut self) {
+        let c = self.clock.clone();
+        self.core.set_clock(Box::new(move || c.lock().unwrap_or_else(PoisonError::into_inner).as_mut().map_or(0.0, |f| f())));
+    }
+
+    fn now(&mut self) -> f64 {
+        self.clock.lock().unwrap_or_else(PoisonError::into_inner).as_mut().map_or(self.pumps, |f| f())
+    }
+
+    fn budget(&self) -> f64 {
+        if self.clock.lock().unwrap_or_else(PoisonError::into_inner).is_some() { HOLD_BUDGET_MS } else { HOLD_BUDGET_PUMPS }
+    }
+
+    fn activate(&self, session: &mut Session) -> Result<(), String> {
+        let i =
+            session.documents().iter().position(|d| d.uid == self.map.doc).ok_or_else(|| "The live presentation is not open any more".to_owned())?;
+        if session.active_index() != Some(i) {
+            session.set_active(i);
+        }
+        Ok(())
+    }
+
+    /// One frame: shares the local edits, takes in the other editors' edits and carets, lands
+    /// what a drag or a composition held, and says who else is here.
+    pub fn pump(&mut self, session: &mut Session) -> Vec<Peer> {
+        self.pumps += 1.0;
+        let now = self.now();
+        self.end_stale_twist(session, now);
+        let peers = {
+            let mut app = DeckApp { session, map: &mut self.map, now };
+            self.core.pump(&mut app)
+        };
+        self.after(session, now);
+        peers
+    }
+
+    /// Lands what waited (held changes, the touched slides, a resync), clears the engine's
+    /// history and ends a link whose replica fell behind for good.
+    fn after(&mut self, session: &mut Session, now: f64) {
+        let r = {
+            let mut app = DeckApp { session, map: &mut self.map, now };
+            app.retry(self.core.live().doc())
+        };
+        if let Err(e) = r {
+            log::warn!("deckcraft-live: a held change did not land: {e}");
+            self.core.end(craft_live::BROKEN);
+        }
+        self.clear_history(session);
+        if self.core.live().doc().is_some_and(DeckDoc::needs_resync) && !self.resync_told {
+            // craft-live cannot replace a replica in place at this pin (L3): end the link, and a
+            // reopened file builds a new one.
+            self.resync_told = true;
+            self.core.end(craft_live::BROKEN);
+        }
+    }
+
+    /// A remote change held past its budget by a twist whose `gesture: end` never came: end the
+    /// twist (D4 review M3). A drag or a composition the person is in is left alone.
+    fn end_stale_twist(&mut self, session: &mut Session, now: f64) {
+        let Some(since) = self.map.held_since else { return };
+        if now - since < self.budget() || session.tool.dragging() {
+            return;
+        }
+        let twist = session
+            .documents()
+            .iter()
+            .find(|d| d.uid == self.map.doc)
+            .and_then(|d| d.interaction.as_ref())
+            .is_some_and(|i| i.label == deckcraft_engine::tools::TWIST);
+        if twist && self.activate(session).is_ok() {
+            if let Err(e) = session.execute("shape.rotate", &json!({"gesture": "end"})) {
+                log::warn!("deckcraft-live: ending a stale twist failed: {e}");
+            }
+            self.map.held_since = Some(now);
+        }
+    }
+
+    fn flush(&mut self, session: &mut Session) {
+        let now = self.now();
+        {
+            let mut app = DeckApp { session, map: &mut self.map, now };
+            self.core.flush(&mut app);
+        }
+        self.after(session, now);
+    }
+
+    /// The gate. LOCAL and FREE commands run now, then flush, so each command is shared alone;
+    /// NOT_YET and MEDIA commands are refused and the presentation is untouched. A shared
+    /// command the safety net refuses is put back, and its reason is the answer.
+    ///
+    /// # Errors
+    /// The refusal or the command's own error, as text for the person.
+    pub fn run(&mut self, session: &mut Session, id: &str, params: &Value) -> Result<Value, String> {
+        match class(id) {
+            Class::NotYet => return Err(NOT_YET_TEXT.to_owned()),
+            Class::Media => return Err(MEDIA_TEXT.to_owned()),
+            Class::Free | Class::History if !self.core.editable() => return Err(self.core.not_editable()),
+            Class::Free | Class::History | Class::Local => {}
+        }
+        self.activate(session)?;
+        self.map.refused = None;
+        let done = session.execute(id, params);
+        self.flush(session);
+        if let Some(why) = self.map.refused.take() {
+            return Err(why);
+        }
+        done.map_err(|e| {
+            let e = e.to_string();
+            if self.map.block.is_some() && e.contains(deckcraft_engine::cmd::NO_ID_SPACE) { NO_SPACE_TEXT.to_owned() } else { e }
+        })
+    }
+
+    /// Whether the host may offer `id` now; `Err(reason)` greys it out.
+    ///
+    /// # Errors
+    /// Why `id` is not available.
+    pub fn allows(&self, id: &str) -> Result<(), &'static str> {
+        match class(id) {
+            Class::Local => Ok(()),
+            Class::NotYet => Err(NOT_YET_TEXT),
+            Class::Media => Err(MEDIA_TEXT),
+            Class::Free | Class::History if self.core.editable() => Ok(()),
+            Class::Free | Class::History => Err(if matches!(self.core.status(), LiveStatus::ReadOnly) { READ_ONLY_TEXT } else { PAUSED_TEXT }),
+        }
+    }
+
+    #[must_use]
+    pub fn status(&self) -> &LiveStatus {
+        self.core.status()
+    }
+
+    /// Lines for the person since the last call: the link's own and the mapping's.
+    pub fn take_notices(&mut self) -> Vec<Notice> {
+        let mut out: Vec<Notice> = self.core.take_notices().into_iter().map(|text| Notice { text, restore: None }).collect();
+        out.append(&mut self.map.notices);
+        out
+    }
+
+    #[must_use]
+    pub fn editable(&self) -> bool {
+        self.core.editable()
+    }
+
+    /// Tells the room where this window's selection and caret are (held to five a second).
+    pub fn send_selection(&mut self, session: &Session) {
+        let Some(st) = session.documents().iter().find(|d| d.uid == self.map.doc) else { return };
+        if let Some(p) = caret_payload(st) {
+            self.core.send_presence(p);
+        }
+    }
+
+    /// Brings back a deleted slide or shape (L5).
+    ///
+    /// # Errors
+    /// Not available until L5.
+    pub fn restore(&mut self, _session: &mut Session, _target: Tomb) -> Result<(), String> {
+        Err(NOT_YET_TEXT.to_owned())
+    }
+
+    /// The clock the link and the hold budget run on, in ms (a browser host passes the page's).
+    pub fn set_clock(&mut self, clock: Box<dyn FnMut() -> f64 + Send>) {
+        *self.clock.lock().unwrap_or_else(PoisonError::into_inner) = Some(clock);
+        self.share_clock();
+    }
+
+    #[must_use]
+    pub fn core(&self) -> &LiveEditing<H, Deck> {
+        &self.core
+    }
+
+    pub fn core_mut(&mut self) -> &mut LiveEditing<H, Deck> {
+        &mut self.core
+    }
+
+    /// The replica, for tests and the worker.
+    #[must_use]
+    pub fn replica(&self) -> Option<&DeckDoc> {
+        self.core.live().doc()
+    }
+
+    /// The base presentation every peer opened.
+    #[must_use]
+    pub fn base(&self) -> &Arc<Presentation> {
+        &self.map.base
+    }
+
+    /// The engine document's uid.
+    #[must_use]
+    pub fn doc(&self) -> u64 {
+        self.map.doc
+    }
+
+    /// The commands sent since the last call, one group each however many updates it took.
+    pub fn take_sent(&mut self) -> Vec<SentGroup> {
+        std::mem::take(&mut self.map.sent)
+    }
+
+    /// Remote changes are waiting for a drag or a composition to end.
+    #[must_use]
+    pub fn holding(&self) -> bool {
+        !self.map.held.is_empty() || self.map.resync_wanted
+    }
+
+    /// Ends the session: the observer and the undo hook come off, the engine's history is cleared
+    /// (its snapshots predate the peers' changes) and the id block is dropped, so the
+    /// presentation is an ordinary one again.
+    pub fn stop(self, session: &mut Session) {
+        session.set_edit_observer(self.map.doc, None);
+        session.set_live_undo_hook(self.map.doc, None);
+        self.clear_history(session);
+        if let Some(st) = session.document_mut(self.map.doc)
+            && st.doc.id_block.is_some()
+        {
+            Arc::make_mut(&mut st.doc).id_block = None;
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_clock() -> Option<Clock> {
+    let start = std::time::Instant::now();
+    Some(Box::new(move || start.elapsed().as_secs_f64() * 1000.0))
+}
+
+/// `std::time` has no clock on the web; the host gives one with [`DeckLive::set_clock`].
+#[cfg(target_arch = "wasm32")]
+fn default_clock() -> Option<Clock> {
+    None
+}
