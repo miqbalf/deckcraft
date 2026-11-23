@@ -3,7 +3,7 @@
 //! unchanged shapes their value; shapes newly tombstoned go through the engine's delete routine
 //! ([`RemoteCtx::delete_shapes`], Ruling D7). The local caret moves with the text around it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use deckcraft_engine::{EngineError, RemoteCtx, Session, TextSel};
@@ -186,13 +186,22 @@ fn rebuild_into(ctx: &mut RemoteCtx, base: &Presentation, replica: &DeckDoc, t: 
     // A shape the replica has live that the engine lacks (brought back by a Restore, or new): its
     // slide is rebuilt whole, so the delete routine's cleanup of its neighbours (a connector end,
     // a group's extent), which the replica derives and never holds, is undone too (L5 review M1).
+    // The engine's shape ids, gathered in one walk per remote change (re-review N3).
     let mut whole = t.whole.clone();
-    for id in &t.shapes {
-        if let Some(e) = replica.shape(*id)
-            && !e.del
-            && slides_holding(cur, &BTreeSet::from([*id])).is_empty()
-        {
-            whole.insert(e.slide);
+    if !t.shapes.is_empty() {
+        let mut shown = HashSet::new();
+        for s in &cur.slides {
+            deckcraft_model::walk(&s.shapes, &mut |sh, _| {
+                shown.insert(sh.id);
+            });
+        }
+        for id in &t.shapes {
+            if !shown.contains(id)
+                && let Some(e) = replica.shape(*id)
+                && !e.del
+            {
+                whole.insert(e.slide);
+            }
         }
     }
     let entries = r.entries_on(&affected);

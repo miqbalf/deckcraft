@@ -32,6 +32,8 @@ pub const TOO_LARGE_TEXT: &str = "This presentation is too large to edit live. I
 /// Local edits the other editors never got were kept as a copy: the host saves it
 /// ([`DeckLive::take_unmerged`]).
 pub const UNMERGED_TEXT: &str = "Some of your changes could not be merged with the other editors. A copy with them is ready to save.";
+/// Why a Restore was not shared, when no more specific reason is known.
+pub const RESTORE_FAILED_TEXT: &str = "The deleted item could not be brought back. Try again.";
 /// Why a shared command is not taken now: the link is not live, or the ticket is read-only.
 pub const PAUSED_TEXT: &str = "Editing is paused until the link to the other editors is back";
 /// Why the link ended: the live presentation was closed here.
@@ -300,7 +302,14 @@ impl<H: Hub> DeckLive<H> {
     /// Local edits the room does not have yet, kept as the unmerged copy before this session
     /// ends the link itself: craft-live hands them over only for the breaks it makes in a pump
     /// (L5 review I1).
+    ///
+    /// Nothing is kept while Live: what was sent is on the wire and will be ordered (re-review
+    /// N2); nor once Broken: craft-live hands the edits over at every break that drops them, and
+    /// its count stays above 0 for the rest of the session (re-review N1).
     fn keep_unconfirmed(&mut self) {
+        if matches!(self.core.status(), LiveStatus::Live { .. } | LiveStatus::Broken(_) | LiveStatus::ReadOnly) {
+            return;
+        }
         if self.core.live().unconfirmed_edits() == 0 {
             return;
         }
@@ -376,8 +385,10 @@ impl<H: Hub> DeckLive<H> {
         }
         self.activate(session)?;
         if id == "file.close" {
-            // Closing the live presentation ends the session first, as `stop` does. Edits not
-            // yet in the room (made while reconnecting) are kept as the unmerged copy.
+            // Closing the live presentation ends the session first, as `stop` does. Edits still
+            // queued go out first; those not yet in the room (made while reconnecting) are kept
+            // as the unmerged copy.
+            self.flush(session);
             self.keep_unconfirmed();
             self.detach(session);
             self.core.end(CLOSED_TEXT);
@@ -471,7 +482,17 @@ impl<H: Hub> DeckLive<H> {
         // craft-live can still refuse the group (the buffer filled, the link dropped): then the
         // target is deleted still (L5 review M7).
         if self.replica().is_some_and(|r| tombstoned(r, target).is_some()) {
-            return Err(if self.core.editable() { craft_live::BUFFER_FULL.to_owned() } else { self.core.not_editable() });
+            let live = self.core.live();
+            return Err(if !self.core.editable() {
+                self.core.not_editable()
+            } else if live.buffer_full() {
+                craft_live::BUFFER_FULL.to_owned()
+            } else if !live.ready_to_type() {
+                // The replica is damaged or given up (L5 re-review N4).
+                craft_live::BROKEN.to_owned()
+            } else {
+                RESTORE_FAILED_TEXT.to_owned()
+            });
         }
         Ok(())
     }
@@ -546,9 +567,17 @@ impl<H: Hub> DeckLive<H> {
 
     /// Ends the session: the observer and the undo hook come off, the engine's history is cleared
     /// (its snapshots predate the peers' changes) and the id block is dropped, so the
-    /// presentation is an ordinary one again.
-    pub fn stop(mut self, session: &mut Session) {
+    /// presentation is an ordinary one again. Returns the unmerged copy ([`DeckLive::take_unmerged`])
+    /// when local edits never reached the room: the host saves it, as for any other copy.
+    #[must_use = "the unmerged copy holds edits the other editors never got"]
+    pub fn stop(mut self, session: &mut Session) -> Option<(String, Vec<u8>)> {
+        if !self.closed {
+            // As `file.close` does: queued edits go out, those the room lacks are kept.
+            self.flush(session);
+            self.keep_unconfirmed();
+        }
         self.detach(session);
+        self.take_unmerged()
     }
 
     fn detach(&mut self, session: &mut Session) {

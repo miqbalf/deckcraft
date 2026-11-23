@@ -193,3 +193,47 @@ fn a_full_offline_buffer_says_so() {
     assert_eq!(refused, craft_live::BUFFER_FULL);
     assert!(p.live.replica().is_some_and(|d| d.shape(g).is_some_and(|e| e.del)), "nothing was written");
 }
+
+/// Stopping the session while edits wait for the link: stop hands back the copy.
+#[test]
+fn stopping_while_reconnecting_returns_the_offline_edits() {
+    let mut r = Room::new(basic(), 2, 17);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.drop_link(0);
+    r.pump_all();
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit offline");
+    r.peers[0].run("text.insert", json!({"text": "unsent "})).expect("type offline");
+    let p = r.peers.remove(0);
+    let (live, mut session) = (p.live, p.session);
+    let (_, bytes) = live.stop(&mut session).expect("stop returns the copy");
+    assert!(copy_text(&bytes, a).contains("unsent"), "the copy holds the unsent text");
+}
+
+/// The copy was taken after the break; closing afterwards adds no second copy and no second line.
+#[test]
+fn closing_after_the_copy_was_taken_makes_no_second_copy() {
+    let mut r = Room::new(basic(), 2, 18);
+    let a = find(&r.peers[0].doc(), "alpha");
+    offline_then_reset(&mut r, a, "first ");
+    assert!(r.peers[0].live.take_unmerged().is_some(), "the copy");
+    r.peers[0].run("file.close", json!({})).ok();
+    r.pump_all();
+    assert!(r.peers[0].live.take_unmerged().is_none(), "nothing new arrived since");
+    assert_eq!(r.peers[0].notices.iter().filter(|n| n.text == UNMERGED_TEXT).count(), 1, "told once");
+}
+
+/// Closing while live right after an edit: the edit is on its way, not "could not be merged".
+#[test]
+fn closing_while_live_right_after_an_edit_keeps_no_copy() {
+    let mut r = Room::new(basic(), 2, 19);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit");
+    r.peers[0].run("text.insert", json!({"text": "quick "})).expect("type");
+    r.peers[0].run("file.close", json!({})).expect("close");
+    assert!(r.peers[0].live.take_unmerged().is_none(), "no copy");
+    assert!(r.peers[0].notices.iter().all(|n| n.text != UNMERGED_TEXT), "no 'could not be merged'");
+    for _ in 0..4 {
+        r.pump(1);
+    }
+    assert!(text_of(&r, 1, a).contains("quick"), "the edit reached the room");
+}
