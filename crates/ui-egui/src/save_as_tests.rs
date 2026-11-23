@@ -338,34 +338,58 @@ fn the_pages_and_the_dialog_download_through_the_one_save_as() {
     assert!(doc_state(h.state()).2, "still unsaved");
 }
 
-/// Plain Save is unchanged: on the desktop the File tab's Save on a presentation that was never
-/// saved goes to File › Save As (as before), and Ctrl+S asks where and the file picked becomes its
-/// file. Inside a page that keeps the files, the File tab's Save goes to the page.
+/// Desktop: the File tab's Save on a presentation that was never saved does what Ctrl+S does: it
+/// asks where with the Save dialog (a .deckcraft) and the file picked becomes its file. It never
+/// goes to File › Save As, which only makes copies.
 #[test]
-fn plain_save_of_an_untitled_presentation_still_takes_the_file() {
+fn file_tab_save_of_an_untitled_presentation_is_ctrl_s_on_the_desktop() {
     let dir = temp_dir("untitled");
-    let picked = dir.join("New.deckcraft").to_string_lossy().to_string();
-    let p = picked.clone();
-    let services = Services { pick_save: Some(Box::new(move |_: &str| Some(p.clone()))), ..Default::default() };
+    let suggested: Rc<RefCell<Vec<String>>> = Rc::default();
+    let (log, d) = (suggested.clone(), dir.clone());
+    let services = Services {
+        pick_save: Some(Box::new(move |name: &str| {
+            log.borrow_mut().push(name.to_string());
+            Some(d.join(name).to_string_lossy().to_string())
+        })),
+        ..Default::default()
+    };
     let mut app = deck(services, None);
+    let title = app.session.active().unwrap().title();
     app.open_backstage(backstage::Page::Info);
     let next = backstage::act(&mut app, backstage::Nav::Save, backstage::Page::Info);
-    assert_eq!(next, Some(backstage::Page::SaveAs), "the File tab's Save goes to Save As, as before");
-    app.save();
-    assert_eq!(app.session.active().unwrap().path.as_deref(), Some(picked.as_str()));
+    assert_eq!(next, None, "saved: back to the slide, not to Save As");
+    let file = dir.join(format!("{title}.deckcraft")).to_string_lossy().to_string();
+    assert_eq!(*suggested.borrow(), [format!("{title}.deckcraft")]);
+    assert_eq!(app.session.active().unwrap().path.as_deref(), Some(file.as_str()), "the deck takes the file");
     assert!(!app.session.active().unwrap().is_dirty());
+    assert!(std::path::Path::new(&file).is_file());
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
+/// Inside a page that keeps the files: the File tab's Save on a presentation that was never saved
+/// does what Ctrl+S does: it goes to the page as a new `.deckcraft` file (`saveAs: true`), with no
+/// download and no Save As page; once the page says it is stored, that is the deck's file.
+#[test]
+fn file_tab_save_of_an_untitled_presentation_is_ctrl_s_inside_the_page() {
     let downloads = Downloads::default();
-    let posted = Rc::new(Cell::new(0));
-    let mut app = SlideApp::new(Session::new(), hosted(&downloads, &posted));
+    let got: Rc<RefCell<Vec<(String, bool, Option<String>)>>> = Rc::default();
+    let mut services = web(&downloads);
+    let log = got.clone();
+    services.host_save = Some(Box::new(move |name: &str, _: &[u8], save_as: bool, id: Option<&str>| {
+        log.borrow_mut().push((name.to_string(), save_as, id.map(str::to_string)));
+        Ok(())
+    }));
+    let mut app = SlideApp::new(Session::new(), services);
     app.start_for_host().unwrap();
     app.run("slide.new", json!({})).unwrap();
+    let title = app.session.active().unwrap().title();
     app.open_backstage(backstage::Page::Info);
     let next = backstage::act(&mut app, backstage::Nav::Save, backstage::Page::Info);
-    assert_ne!(next, Some(backstage::Page::SaveAs), "inside the page Save is not a download");
-    assert_eq!(posted.get(), 1, "the untitled presentation went to the page");
-    assert!(downloads.borrow().is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(next, None, "saved to the page: back to the slide");
+    assert_eq!(got.borrow().iter().map(|(n, s, _)| (n.clone(), *s)).collect::<Vec<_>>(), [(format!("{title}.deckcraft"), true)]);
+    assert!(downloads.borrow().is_empty(), "no download");
+    assert_eq!(app.session.active().unwrap().path.as_deref(), Some(format!("{title}.deckcraft").as_str()), "the deck takes the page's file");
+    assert!(!app.session.active().unwrap().is_dirty());
 }
 
 /// Desktop many-file export: the dialog confirms only the base name, so when numbered files
