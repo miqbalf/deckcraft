@@ -1,5 +1,5 @@
 use super::{
-    Align2, Color32, CornerRadius, Icon, Rect, Sense, SlideApp, Stroke, Tokens, Ui, big, big_button, enabled, group, json, pos2, run, scheme,
+    Align2, Color32, CornerRadius, Icon, Rect, Sense, SlideApp, Stroke, Tokens, Ui, big, big_button, gate, group, json, pos2, run, scheme,
     small_button, theme, vec2, widgets,
 };
 
@@ -28,7 +28,7 @@ pub(super) fn design(app: &mut SlideApp, ui: &mut Ui) {
         {
             run(app, "design.theme", json!({"name": n}));
         }
-        if small_button(ui, Icon::Themes, "Browse for Themes…", enabled(app, "design.browseTheme"), false).clicked() {
+        if small_button(ui, Icon::Themes, "Browse for Themes…", gate(app, "design.browseTheme"), false).clicked() {
             run(app, "app.browseThemeDialog", json!({}));
         }
     });

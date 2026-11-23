@@ -338,6 +338,10 @@ impl SlideApp {
             ribbon::show(self, ui);
             status::status_bar(self, ui);
             crate::live::status_strip(self, ui);
+        } else {
+            // A copy of unmerged edits waits also over the start screen and the File tab (U1
+            // review F2), where there is no status bar.
+            crate::live::status_strip(self, ui);
         }
         let now = ui.input(|i| i.time);
         if self.tick_anim_preview(now) {

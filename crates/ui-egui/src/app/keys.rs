@@ -243,9 +243,20 @@ impl SlideApp {
 
     /// True (and says why) when key `name` would edit while the live presentation takes none.
     fn refuse_key(&mut self, name: &str, mods: Mods, refused: Option<&'static str>) -> bool {
-        let Some(why) = refused.and_then(|why| self.key_refusal(name, mods, why)) else { return false };
+        let why = match refused {
+            Some(why) => self.key_refusal(name, mods, why),
+            // Editing: a shortcut whose command the gate refuses now (the Delete key on slides in
+            // a deck with sections, U1 review M7) is refused up front, with the reason.
+            None => Self::shortcut_spec(name, mods).and_then(|s| self.live_refusal(s.id)),
+        };
+        let Some(why) = why else { return false };
         self.set_status(crate::live::tr(why));
         true
+    }
+
+    /// The registered command whose shortcut key `name` with `mods` is.
+    fn shortcut_spec(name: &str, mods: Mods) -> Option<&'static deckcraft_engine::CommandSpec> {
+        deckcraft_engine::command_specs().iter().find(|s| s.shortcut.is_some_and(|k| deckcraft_engine::keys::shortcut_matches(k, name, mods)))
     }
 
     /// Why key `name` is not taken while the live presentation takes no edits (`why`), when it
@@ -258,8 +269,7 @@ impl SlideApp {
         let arrow = matches!(name, "Left" | "Right" | "Up" | "Down");
         // Every registered shortcut, with or without Cmd (Shift+F3, Alt+Shift+V), goes by its
         // command's gate.
-        let spec =
-            deckcraft_engine::command_specs().iter().find(|s| s.shortcut.is_some_and(|k| deckcraft_engine::keys::shortcut_matches(k, name, mods)));
+        let spec = Self::shortcut_spec(name, mods);
         match spec.map(|s| self.live_refusal(s.id)) {
             Some(Some(refused)) => return Some(refused),
             Some(None) if mods.cmd => return None,

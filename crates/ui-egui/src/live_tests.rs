@@ -326,14 +326,27 @@ fn the_canvas_stays_on_my_slide_when_a_peer_reorders() {
     room.h.get_by_label("Slide 3 of 3");
 }
 
+/// While live, Undo and Redo take back only my own commands (L6, Ruling D4): they are offered only
+/// when there is one, never because a peer edited (D4 review M5, from `DeckLive::can_undo`).
 #[test]
-fn undo_while_live_says_not_yet() {
+fn undo_is_offered_only_for_my_own_commands() {
     let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
     room.h.run_steps(1);
-    assert!(crate::ribbon::enabled(room.ann(), "edit.undo"), "Undo is offered while live");
-    let _ = room.h.state_mut().run("edit.undo", json!({}));
-    room.h.run_steps(2);
-    room.h.get_by_label_contains(NOT_YET_TEXT);
+    assert!(!crate::ribbon::enabled(room.ann(), "edit.undo"), "nothing of mine to undo");
+    room.bob.run("slide.go", json!({"index": 1}));
+    room.bob.run("arrange.nudge", json!({"ids": [alpha.0], "dx": 10.0, "dy": 0.0}));
+    room.settle();
+    assert!(!crate::ribbon::enabled(room.ann(), "edit.undo"), "a peer's edit is not mine to undo");
+    let before = room.ann_doc();
+    room.h.state_mut().run("slide.new", json!({"layout": "blank"})).unwrap();
+    room.settle();
+    assert!(crate::ribbon::enabled(room.ann(), "edit.undo"), "my command can be taken back");
+    assert!(!crate::ribbon::enabled(room.ann(), "edit.redo"), "nothing undone yet");
+    room.h.state_mut().run("edit.undo", json!({})).unwrap();
+    room.settle();
+    assert_eq!(room.ann_doc().slides.len(), before.slides.len(), "my slide is gone again");
+    assert!(crate::ribbon::enabled(room.ann(), "edit.redo"), "and can be brought back");
 }
 
 #[test]
@@ -722,4 +735,197 @@ fn a_shortcut_without_cmd_is_gated_too() {
     room.h.run_steps(1);
     assert!(*before == *room.ann_doc(), "no change");
     assert_eq!(room.h.state_mut().fresh_status().as_deref(), Some(READ_ONLY_TEXT), "refused up front, with the reason");
+}
+
+/// A viewer's single Replace says why it was refused; the next match does not write over it (N1).
+#[test]
+fn single_replace_says_the_live_refusal() {
+    let mut room = Room::new(&deck(false), Access::Read, Access::Edit);
+    room.h.state_mut().dialog = Some(crate::dialogs::Dialog::new("find"));
+    room.h.state_mut().dialog.as_mut().unwrap().fields.extend([
+        ("text".to_owned(), "alpha".to_owned()),
+        ("with".to_owned(), "x".to_owned()),
+        ("replace".to_owned(), "1".to_owned()),
+    ]);
+    room.h.run_steps(2);
+    room.h.get_by_role_and_label(Role::Button, "Find Next").click();
+    room.h.run_steps(2);
+    let before = room.ann_doc();
+    // The dialog's Replace, beside its Find Next (the ribbon has a Replace too).
+    let next = room.h.get_by_role_and_label(Role::Button, "Find Next").rect().center();
+    let replace = room
+        .h
+        .query_all_by_role_and_label(Role::Button, "Replace")
+        .min_by(|a, b| a.rect().center().distance(next).total_cmp(&b.rect().center().distance(next)))
+        .unwrap();
+    replace.click();
+    room.h.run_steps(2);
+    let status = room.h.state().dialog.as_ref().and_then(|d| d.fields.get("status").cloned()).unwrap_or_default();
+    assert_eq!(status, READ_ONLY_TEXT, "the reason stays shown");
+    assert!(*before == *room.ann_doc(), "nothing was replaced");
+}
+
+/// A desktop write that fails keeps the copy offered, with the error (U1 review F5).
+#[test]
+fn a_failed_write_keeps_the_copy() {
+    let services = Services {
+        pick_save: Some(Box::new(|name: &str| Some(format!("/nowhere/{name}")))),
+        write: Some(Box::new(|_: &str, _: &[u8]| Err("disk full".to_owned()))),
+        ..Default::default()
+    };
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, services);
+    room.h.state_mut().pending_unmerged.push(copy());
+    room.h.run_steps(2);
+    room.h.get_by_role_and_label(Role::Button, super::live::SAVE_COPY_TEXT).click();
+    room.h.run_steps(2);
+    assert_eq!(room.h.state().pending_unmerged, vec![copy()], "the copy still waits");
+    assert_eq!(room.h.state_mut().fresh_status().as_deref(), Some("disk full"), "the error is shown");
+}
+
+/// A page that keeps the files gets the copy through `save_copy` (a new file, Ruling D18), not as
+/// a download; a refused hand-over keeps it waiting.
+#[test]
+fn the_copy_goes_to_the_page_as_a_new_file() {
+    let downloads = HostLog::default();
+    let copies = HostLog::default();
+    let refuse = std::rc::Rc::new(std::cell::Cell::new(true));
+    let mut services = downloading(&downloads);
+    let (c, r) = (copies.clone(), refuse.clone());
+    services.save_copy = Some(Box::new(move |name: &str, b: &[u8]| {
+        if r.get() {
+            return Err("the page is gone".to_owned());
+        }
+        c.0.borrow_mut().push((name.to_owned(), b.to_vec()));
+        Ok(())
+    }));
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, services);
+    room.h.state_mut().pending_unmerged.push(copy());
+    room.h.state_mut().offer_waiting_copies();
+    assert!(room.h.state().copies_waiting(), "a refused hand-over keeps the copy");
+    refuse.set(false);
+    room.h.state_mut().offer_waiting_copies();
+    assert_eq!(copies.got(), vec![copy()], "the page got the copy");
+    assert!(downloads.got().is_empty(), "not as a download");
+    assert!(!room.h.state().copies_waiting(), "nothing waits");
+}
+
+/// With the live presentation closed and no other open, a waiting copy is still offered on the
+/// start screen (U1 review F2).
+#[test]
+fn a_waiting_copy_is_offered_on_the_start_screen() {
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, cancelling());
+    room.h.state_mut().pending_unmerged.push(copy());
+    let _ = room.h.state_mut().run("file.close", json!({}));
+    room.h.run_steps(3);
+    assert!(room.h.state().session.active().is_none(), "no presentation is open");
+    room.h.get_by_role_and_label(Role::Button, super::live::SAVE_COPY_TEXT);
+}
+
+/// A host page starts with an empty presentation; the live one takes its place and is shown.
+#[test]
+fn a_live_start_takes_the_place_of_the_hosts_empty_presentation() {
+    let bytes = deck(false);
+    let relay = MemRelay::new();
+    let mut app = SlideApp::new(Session::new(), Services::default());
+    app.start_for_host().unwrap();
+    let base = BaseFile { bytes: &bytes, name: NAME, expected_sha256: None };
+    let live = DeckLive::start(BoxHub(Box::new(relay.connect("ann", "Ann", true))), ROOM, &base, Access::Edit, "ann", &mut app.session).unwrap();
+    let doc = live.doc();
+    app.start_live(live);
+    assert_eq!(app.session.documents().len(), 1, "the empty presentation gave way");
+    assert_eq!(app.session.active().map(|d| d.uid), Some(doc), "the live presentation is shown");
+}
+
+/// A viewer's armed Format Painter does not apply on a click (F7): refused up front, with why.
+#[test]
+fn a_viewers_format_painter_is_refused() {
+    let mut room = Room::new(&deck(false), Access::Read, Access::Edit);
+    let alpha = find(&room.ann_doc(), "alpha");
+    let beta = find(&room.ann_doc(), "beta");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("edit.select", json!({"ids": [alpha.0]})).unwrap();
+    room.h.state_mut().session.execute("format.painter", &json!({})).unwrap();
+    room.h.run_steps(2);
+    let before = room.ann_doc();
+    let at = slide_to_screen(&room.h, 420.0, 240.0);
+    let press =
+        |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+    room.h.input_mut().events.extend([egui::Event::PointerMoved(at), press(true)]);
+    room.h.run_steps(1);
+    room.h.input_mut().events.push(press(false));
+    room.h.run_steps(2);
+    assert!(*before == *room.ann_doc(), "{beta:?} was not restyled, not even for a frame");
+    assert_eq!(room.h.state_mut().fresh_status().as_deref(), Some(READ_ONLY_TEXT), "with the reason");
+}
+
+/// A viewer can still marquee-select: it changes nothing (F7).
+#[test]
+fn a_viewer_can_marquee_select() {
+    let mut room = Room::new(&deck(false), Access::Read, Access::Edit);
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.run_steps(2);
+    let before = room.ann_doc();
+    let from = slide_to_screen(&room.h, 20.0, 20.0);
+    let to = slide_to_screen(&room.h, 290.0, 170.0);
+    let press =
+        |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+    room.h.input_mut().events.extend([egui::Event::PointerMoved(from), press(from, true)]);
+    room.h.run_steps(1);
+    room.h.input_mut().events.push(egui::Event::PointerMoved(from + (to - from) * 0.5));
+    room.h.run_steps(1);
+    room.h.input_mut().events.push(egui::Event::PointerMoved(to));
+    room.h.run_steps(1);
+    room.h.input_mut().events.push(press(to, false));
+    room.h.run_steps(2);
+    assert_eq!(room.ann().session.active().unwrap().selection.shapes, vec![alpha], "the marquee selected");
+    assert!(*before == *room.ann_doc(), "and changed nothing");
+}
+
+/// In a deck with sections, the Delete key on selected slides and pasting slides are refused with
+/// why, as the slide commands are (U1 review M7).
+#[test]
+fn slide_delete_key_and_slide_paste_are_gated_with_sections() {
+    let mut room = Room::editors(&deck(true));
+    room.h.run_steps(1);
+    let second = room.ann_doc().slides[1].id;
+    {
+        let st = room.h.state_mut().session.active_mut().unwrap();
+        st.selection.shapes.clear();
+        st.selection.text = None;
+        st.selection.slides = vec![second];
+    }
+    assert_eq!(room.h.state().live_refusal("edit.delete"), Some(SECTIONS_TEXT), "Delete on slides is greyed with why");
+    let before = room.ann_doc();
+    room.h.input_mut().events.push(egui::Event::Key {
+        key: egui::Key::Delete,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Default::default(),
+    });
+    room.h.run_steps(2);
+    assert!(*before == *room.ann_doc(), "the Delete key removed no slide");
+    assert_eq!(room.h.state_mut().fresh_status().as_deref(), Some(SECTIONS_TEXT), "and said why");
+    room.h.state_mut().run("edit.copy", json!({})).unwrap();
+    assert!(!crate::ribbon::enabled(room.ann(), "edit.paste"), "pasting slides is greyed");
+    assert_eq!(crate::ribbon::gate(room.ann(), "edit.paste").why, Some(SECTIONS_TEXT), "with the reason");
+}
+
+/// Clicking the badge of an editor whose place is not known (their slide was deleted, or they
+/// selected nothing yet) says so instead of doing nothing (L7 note).
+#[test]
+fn following_an_editor_without_a_place_says_so() {
+    let mut room = Room::editors(&deck(false));
+    room.bob.run("slide.go", json!({"index": 2}));
+    room.settle();
+    // Ann deletes the slide Bob is on: his caret is dropped here for good, until he selects again
+    // (Bob does not pump here, so he has not moved yet).
+    room.h.state_mut().run("slide.go", json!({"index": 2})).unwrap();
+    room.h.state_mut().run("slide.delete", json!({})).unwrap();
+    room.h.run_steps(2);
+    room.h.get_by_role_and_label(Role::Button, "Bob").click();
+    room.h.run_steps(2);
+    let said = room.h.state_mut().fresh_status().unwrap_or_default();
+    assert!(said.starts_with("Bob"), "the person is told: {said}");
 }

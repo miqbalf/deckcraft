@@ -24,6 +24,7 @@ pub(super) fn find_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bo
     let q = json!({"text": text, "matchCase": case, "wholeWords": whole});
     let mut close = false;
     let mut find_next = false;
+    let mut refused = false;
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let has = !text.is_empty();
@@ -42,14 +43,16 @@ pub(super) fn find_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bo
                             let n = d.get("next", "1").parse::<usize>().unwrap_or(1);
                             d.fields.insert("next".into(), n.saturating_sub(1).to_string());
                         }
-                        // The live presentation refused the edit: say why, not "not found".
+                        // The live presentation refused the edit: say why, not "not found",
+                        // and stay on this match (finding the next would write over the reason).
                         Err(e) if app.live_refusal("text.replace").is_some() => {
                             d.fields.insert("status".into(), e);
+                            refused = true;
                         }
                         Err(_) => {}
                     }
                 }
-                find_next = true;
+                find_next = !refused;
             }
             if ui.add_enabled(has, egui::Button::new("Replace All")).clicked() {
                 let mut p = q.clone();
@@ -69,7 +72,7 @@ pub(super) fn find_dialog(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bo
             close = true;
         }
     });
-    if find_next {
+    if find_next && !refused {
         let list = app.session.execute("text.find", &q).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
         if list.is_empty() {
             d.fields.insert("status".into(), format!("DeckCraft can't find “{text}”."));

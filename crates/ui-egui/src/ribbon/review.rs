@@ -1,8 +1,8 @@
-use super::{Icon, SlideApp, Ui, Value, big, big_button, big_button_ex, enabled, group, json, rows, run, small_button, tip};
+use super::{Icon, SlideApp, Ui, Value, big, big_button, big_button_ex, gate, group, json, rows, run, small_button, tip};
 
 fn comment_nav(app: &mut SlideApp, ui: &mut Ui, forward: bool) {
     let (icon, label, id) = if forward { (Icon::NextComment, "Next", "comment.next") } else { (Icon::PrevComment, "Previous", "comment.prev") };
-    if small_button(ui, icon, label, enabled(app, id), false).on_hover_text(tip(id, label)).clicked() {
+    if small_button(ui, icon, label, gate(app, id), false).on_hover_text(tip(id, label)).clicked() {
         let params = match app.ui.comment_focus {
             Some((slide, index)) if app.session.active().is_some_and(|d| d.selection.slide == slide) => json!({"slide": slide, "index": index}),
             _ => json!({}),
@@ -32,7 +32,7 @@ pub(super) fn review(app: &mut SlideApp, ui: &mut Ui) {
     });
     group(ui, |ui| {
         big(app, ui, Icon::Compare, "Compare", "app.compareDialog", json!({}));
-        let comparing = enabled(app, "review.endCompare");
+        let comparing = gate(app, "review.endCompare");
         if big_button(ui, Icon::Check, "Accept\nAll", comparing).clicked() {
             run(app, "review.accept", json!({"all": true}));
         }

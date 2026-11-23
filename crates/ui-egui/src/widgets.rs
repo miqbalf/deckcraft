@@ -27,7 +27,7 @@ fn bg(ui: &Ui, r: &Response, selected: bool, t: &Tokens) -> Option<Color32> {
 }
 
 /// A large ribbon button: 32 px icon over a one- or two-line label.
-pub fn big_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool) -> Response {
+pub fn big_button(ui: &mut Ui, icon: Icon, label: &str, enabled: impl Into<crate::live::Gate>) -> Response {
     big_button_ex(ui, icon, label, enabled, false, false).0
 }
 
@@ -48,7 +48,16 @@ fn big_button_width(text_w: f32, split: bool) -> f32 {
 /// Large button; with `split`, the label row ends in a separate dropdown target (returns its
 /// response). Like Office's split buttons, the icon and the label text run the main command; only
 /// the chevron at the end of the label row opens the menu.
-pub fn big_button_ex(ui: &mut Ui, icon: Icon, label: &str, enabled: bool, split: bool, selected: bool) -> (Response, Option<Response>) {
+pub fn big_button_ex(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    enabled: impl Into<crate::live::Gate>,
+    split: bool,
+    selected: bool,
+) -> (Response, Option<Response>) {
+    let gate: crate::live::Gate = enabled.into();
+    let enabled = gate.on;
     let t = Tokens::get(ui.ctx());
     let font = theme::font(11.0);
     let lines: Vec<&str> = wrap_label(label);
@@ -57,7 +66,7 @@ pub fn big_button_ex(ui: &mut Ui, icon: Icon, label: &str, enabled: bool, split:
     // The whole button runs the main command; the narrow strip at the end of the label row is the
     // dropdown. A split button therefore has two named targets, not a third unnamed row target.
     let (rect, resp) = ui.allocate_exact_size(vec2(w, RIBBON_H - 2.0), if enabled { Sense::click() } else { Sense::hover() });
-    let resp = crate::live::gate_hint(resp, enabled);
+    let resp = crate::live::gate_hint(resp, &gate);
     // Named for screen readers and UI tests ("Ink to\nShape" reads "Ink to Shape").
     let spoken = label.replace('\n', " ");
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &spoken));
@@ -127,13 +136,20 @@ pub fn chevron(p: &egui::Painter, c: egui::Pos2, s: f32, col: Color32) {
 }
 
 /// A small ribbon button: 16 px icon + label in one row (label may be empty).
-pub fn small_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool, selected: bool) -> Response {
+pub fn small_button(ui: &mut Ui, icon: Icon, label: &str, enabled: impl Into<crate::live::Gate>, selected: bool) -> Response {
     small_button_ex(ui, icon, label, enabled, selected, false).0
 }
 
 /// Draw a small named button, optionally with a separately named options chevron, and return
 /// both click targets.
-pub fn small_button_ex(ui: &mut Ui, icon: Icon, label: &str, enabled: bool, selected: bool, split: bool) -> (Response, Option<Response>) {
+pub fn small_button_ex(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    enabled: impl Into<crate::live::Gate>,
+    selected: bool,
+    split: bool,
+) -> (Response, Option<Response>) {
     small_button_named(ui, icon, label, if label.is_empty() { "Options" } else { label }, enabled, selected, split)
 }
 
@@ -145,10 +161,12 @@ pub fn small_button_named(
     icon: Icon,
     label: &str,
     name: &str,
-    enabled: bool,
+    enabled: impl Into<crate::live::Gate>,
     selected: bool,
     split: bool,
 ) -> (Response, Option<Response>) {
+    let gate: crate::live::Gate = enabled.into();
+    let enabled = gate.on;
     let t = Tokens::get(ui.ctx());
     let font = theme::font(12.0);
     let tw = if label.is_empty() { 0.0 } else { ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font.clone(), t.text).size().x) + 5.0 };
@@ -156,7 +174,7 @@ pub fn small_button_named(
     let w = 24.0 + tw + arrow_w;
     // As in `big_button_ex`, a split row is two targets and must not add a third named node.
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 22.0), if enabled && !split { Sense::click() } else { Sense::hover() });
-    let resp = crate::live::gate_hint(resp, enabled);
+    let resp = crate::live::gate_hint(resp, &gate);
     if !name.is_empty() && !split {
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, name));
     }
@@ -245,12 +263,14 @@ fn split_popup_id(main: &Response) -> egui::Id {
 
 /// A menu choice ticked in the icon column (Align to Slide…), its text lined up with the
 /// [`small_button`] items around it.
-pub fn check_item(ui: &mut Ui, label: &str, enabled: bool, on: bool) -> Response {
+pub fn check_item(ui: &mut Ui, label: &str, enabled: impl Into<crate::live::Gate>, on: bool) -> Response {
+    let gate: crate::live::Gate = enabled.into();
+    let enabled = gate.on;
     let t = Tokens::get(ui.ctx());
     let font = theme::font(12.0);
     let tw = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font.clone(), t.text).size().x) + 5.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(24.0 + tw, 22.0), if enabled { Sense::click() } else { Sense::hover() });
-    let resp = crate::live::gate_hint(resp, enabled);
+    let resp = crate::live::gate_hint(resp, &gate);
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, label));
     let painter = ui.painter_at(rect);
     if let Some(c) = bg(ui, &resp, false, &t) {
@@ -264,10 +284,12 @@ pub fn check_item(ui: &mut Ui, label: &str, enabled: bool, on: bool) -> Response
 }
 
 /// A square icon toggle (B, I, U, alignment…).
-pub fn icon_toggle(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool, on: bool) -> Response {
+pub fn icon_toggle(ui: &mut Ui, icon: Icon, tip: &str, enabled: impl Into<crate::live::Gate>, on: bool) -> Response {
+    let gate: crate::live::Gate = enabled.into();
+    let enabled = gate.on;
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), if enabled { Sense::click() } else { Sense::hover() });
-    let resp = crate::live::gate_hint(resp, enabled);
+    let resp = crate::live::gate_hint(resp, &gate);
     let painter = ui.painter_at(rect);
     if let Some(c) = bg(ui, &resp, on, &t) {
         painter.rect_filled(rect, CornerRadius::same(4), c);
@@ -279,10 +301,12 @@ pub fn icon_toggle(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool, on: bool) 
 }
 
 /// Icon with a colour bar under it and a dropdown arrow (Font Color, Highlight, Shape Fill…).
-pub fn color_split(ui: &mut Ui, icon: Icon, tip: &str, color: Color32, enabled: bool) -> (Response, Response) {
+pub fn color_split(ui: &mut Ui, icon: Icon, tip: &str, color: Color32, enabled: impl Into<crate::live::Gate>) -> (Response, Response) {
+    let gate: crate::live::Gate = enabled.into();
+    let enabled = gate.on;
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 22.0), Sense::hover());
-    let resp = crate::live::gate_hint(resp, enabled);
+    let resp = crate::live::gate_hint(resp, &gate);
     let main = ui.interact(Rect::from_min_size(rect.min, vec2(23.0, 22.0)), resp.id.with("m"), if enabled { Sense::click() } else { Sense::hover() });
     main.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, tip));
     let arrow = ui.interact(
@@ -337,10 +361,19 @@ pub fn rows<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 /// A text dropdown field (font name, size): shows `current`, opens a popup with `add_items`.
 /// `label` is what assistive technology calls it ("Font", "Start"); `current` is exposed as its
 /// value, so an empty box is still announced by its purpose and never by an internal key (#1956).
-pub fn dropdown(ui: &mut Ui, label: &str, current: &str, width: f32, enabled: bool, add_items: impl FnOnce(&mut Ui)) -> Response {
+pub fn dropdown(
+    ui: &mut Ui,
+    label: &str,
+    current: &str,
+    width: f32,
+    enabled: impl Into<crate::live::Gate>,
+    add_items: impl FnOnce(&mut Ui),
+) -> Response {
+    let gate: crate::live::Gate = enabled.into();
+    let enabled = gate.on;
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 22.0), if enabled { Sense::click() } else { Sense::hover() });
-    let resp = crate::live::gate_hint(resp, enabled);
+    let resp = crate::live::gate_hint(resp, &gate);
     let painter = ui.painter_at(rect);
     painter.rect(
         rect,

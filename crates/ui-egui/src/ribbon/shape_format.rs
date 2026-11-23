@@ -1,7 +1,7 @@
 use super::arrange::{arrange_group, size_group};
 use super::galleries::{cref_param, effects_menu, outline_menu, quick_styles, shapes_gallery};
 use super::{
-    Color32, CornerRadius, Icon, Rect, Sense, SlideApp, Stroke, Tokens, Ui, big, big_button, enabled, group, json, pos2, rows, run, scheme,
+    Color32, CornerRadius, Icon, Rect, Sense, SlideApp, Stroke, Tokens, Ui, big, big_button, gate, group, json, pos2, rows, run, scheme,
     small_button, small_button_ex, theme, vec2, widgets,
 };
 
@@ -109,7 +109,7 @@ fn stroke_guide(p: &egui::Painter, g: &deckcraft_geom::warp::Guide, color: Color
 /// Render the Shape Format tab's shape, fill, outline, effects, text, arrange, and size controls.
 pub(super) fn shape_format(app: &mut SlideApp, ui: &mut Ui) {
     let sc = scheme(app);
-    let sel = enabled(app, "shape.fill");
+    let sel = gate(app, "shape.fill");
     group(ui, |ui| {
         let r = big_button(ui, Icon::Shapes, "Shapes", true);
         egui::Popup::menu(&r).show(|ui| {
@@ -132,7 +132,7 @@ pub(super) fn shape_format(app: &mut SlideApp, ui: &mut Ui) {
             ui.separator();
             smooth_corners_row(app, ui);
         });
-        let can_merge = enabled(app, "shape.merge");
+        let can_merge = gate(app, "shape.merge");
         let r = big_button(ui, Icon::MergeShapes, "Merge\nShapes", can_merge).on_hover_text("Merge Shapes");
         egui::Popup::menu(&r).show(|ui| {
             for (op, label) in deckcraft_engine::cmd::merge::OPS {

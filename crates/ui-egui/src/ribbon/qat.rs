@@ -103,10 +103,15 @@ fn run(app: &mut SlideApp, q: &QatItem) {
 
 /// Whether a Quick Access Toolbar item can be run right now.
 pub fn is_enabled(app: &SlideApp, id: &str) -> bool {
+    gate(app, id).on
+}
+
+/// [`is_enabled`], with the live gate's reason for the toolbar button's tooltip.
+fn gate(app: &SlideApp, id: &str) -> crate::live::Gate {
     match id {
-        "app.home" => true,
-        "file.save" | "show.fromStart" | "review.spelling" | "app.find" => app.session.active().is_some(),
-        id => crate::ribbon::enabled(app, id),
+        "app.home" => true.into(),
+        "file.save" | "show.fromStart" | "review.spelling" | "app.find" => app.session.active().is_some().into(),
+        id => crate::ribbon::gate(app, id),
     }
 }
 
@@ -138,7 +143,7 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
     let mac = app.session.mac_keys;
     for (i, q) in items.iter().enumerate() {
         let on = q.id == "app.home" && app.backstage_open();
-        let en = is_enabled(app, &q.id);
+        let en = gate(app, &q.id);
         let r = crate::widgets::icon_toggle(ui, q.icon(), &tip(q, i, mac), en, on);
         if r.clicked() {
             run(app, q);

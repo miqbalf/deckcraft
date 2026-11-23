@@ -1,15 +1,15 @@
 use super::arrange::{arrange_group, size_group};
 use super::galleries::{cref_param, shapes_gallery};
 use super::{
-    Color32, CornerRadius, Icon, Rect, SlideApp, Stroke, Ui, Value, big, big_button, color_split, enabled, group, json, pos2, rows, run, scheme,
-    small, small_button_ex, theme, vec2, widgets,
+    Color32, CornerRadius, Icon, Rect, SlideApp, Stroke, Ui, Value, big, big_button, color_split, gate, group, json, pos2, rows, run, scheme, small,
+    small_button_ex, theme, vec2, widgets,
 };
 
 /// Render the Picture Format tab's corrections, colour, artistic effects, transparency, styles,
 /// border, and picture actions.
 pub(super) fn picture_format(app: &mut SlideApp, ui: &mut Ui) {
     group(ui, |ui| {
-        let r = big_button(ui, Icon::RemoveBackground, "Remove\nBackground", enabled(app, "picture.removeBackground"));
+        let r = big_button(ui, Icon::RemoveBackground, "Remove\nBackground", gate(app, "picture.removeBackground"));
         egui::Popup::menu(&r).show(|ui| {
             for (label, tol) in [("Remove Background", 20.0), ("Remove More (looser)", 35.0), ("Remove Less (tighter)", 10.0)] {
                 if ui.button(label).clicked() {
@@ -66,7 +66,7 @@ pub(super) fn picture_format(app: &mut SlideApp, ui: &mut Ui) {
                 ui.close();
             }
         });
-        let r = big_button(ui, Icon::ArtisticEffects, "Artistic\nEffects", enabled(app, "picture.artisticEffect"));
+        let r = big_button(ui, Icon::ArtisticEffects, "Artistic\nEffects", gate(app, "picture.artisticEffect"));
         egui::Popup::menu(&r).show(|ui| {
             if ui.button("None").clicked() {
                 run(app, "picture.artisticEffect", json!({"effect": "none"}));
@@ -88,7 +88,7 @@ pub(super) fn picture_format(app: &mut SlideApp, ui: &mut Ui) {
         rows(ui, |ui| {
             small(app, ui, Icon::ChangePicture, "Change Picture", "app.changePictureDialog", json!({}));
             small(app, ui, Icon::ResetPicture, "Reset Picture", "picture.reset", json!({}));
-            let (main, arrow) = small_button_ex(ui, Icon::CompressPictures, "Compress Pictures", enabled(app, "picture.compress"), false, true);
+            let (main, arrow) = small_button_ex(ui, Icon::CompressPictures, "Compress Pictures", gate(app, "picture.compress"), false, true);
             if let Some(arrow) = arrow {
                 widgets::split_popup(&main, &arrow)
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)

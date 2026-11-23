@@ -71,16 +71,25 @@ pub fn known(id: &str) -> bool {
 }
 
 pub fn enabled(app: &SlideApp, id: &str) -> bool {
-    // The live presentation's gate first: the widget drawn next shows why (`live::gate_hint`).
-    let why = app.live_refusal(id);
-    crate::live::note_gate(why);
-    if why.is_some() {
-        return false;
+    gate(app, id).on
+}
+
+/// Whether `id` is offered now, with the live gate's reason when that greys it: pass it to the
+/// control drawn for `id`, which shows the reason as its tooltip.
+pub fn gate(app: &SlideApp, id: &str) -> crate::live::Gate {
+    // The live presentation's gate first.
+    if let Some(why) = app.live_refusal(id) {
+        return crate::live::Gate { on: false, why: Some(why) };
     }
-    match deckcraft_engine::find_command(id) {
+    // While live, Undo and Redo take back only my own commands (L6): offered when there is one.
+    if let Some(on) = app.live_history(id) {
+        return on.into();
+    }
+    let on = match deckcraft_engine::find_command(id) {
         Some(c) => (c.enabled)(&app.session).is_ok(),
         None => crate::UI_COMMANDS.iter().any(|c| c.0 == id),
-    }
+    };
+    on.into()
 }
 
 fn run(app: &mut SlideApp, id: &str, p: Value) {
@@ -312,11 +321,11 @@ fn edge_cue(ui: &mut Ui, rect: Rect, glyph: &str, hint: &str, t: &Tokens) -> boo
 /// Draw a large ribbon command button, honour its enabled state, run the command on click, and
 /// attach its menu.
 fn big(app: &mut SlideApp, ui: &mut Ui, icon: Icon, label: &str, id: &str, p: Value) {
-    let en = enabled(app, id);
+    let en = gate(app, id);
     let r = big_button(ui, icon, label, en);
     if id == "insert.dateTime" {
         let name = label.replace('\n', " ");
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, en, &name));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, en.on, &name));
     }
     let r = r.on_hover_text(tip(id, label));
     if r.clicked() {
@@ -326,7 +335,7 @@ fn big(app: &mut SlideApp, ui: &mut Ui, icon: Icon, label: &str, id: &str, p: Va
 }
 
 fn small(app: &mut SlideApp, ui: &mut Ui, icon: Icon, label: &str, id: &str, p: Value) {
-    let en = enabled(app, id);
+    let en = gate(app, id);
     let r = small_button(ui, icon, label, en, false).on_hover_text(tip(id, label));
     if r.clicked() {
         run(app, id, p.clone());
@@ -335,7 +344,7 @@ fn small(app: &mut SlideApp, ui: &mut Ui, icon: Icon, label: &str, id: &str, p: 
 }
 
 fn toggle(app: &mut SlideApp, ui: &mut Ui, icon: Icon, label: &str, id: &str, on: bool) {
-    let en = enabled(app, id);
+    let en = gate(app, id);
     if icon_toggle(ui, icon, &tip(id, label), en, on).clicked() {
         run(app, id, json!({}));
     }
@@ -370,7 +379,7 @@ pub fn fmt_state(app: &mut SlideApp) -> Value {
 }
 
 pub fn menu_item(app: &mut SlideApp, ui: &mut Ui, icon: Icon, label: &str, id: &str, p: Value) {
-    let en = enabled(app, id);
+    let en = gate(app, id);
     let r = small_button(ui, icon, label, en, false);
     if r.clicked() {
         run(app, id, p);

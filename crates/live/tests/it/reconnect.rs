@@ -266,3 +266,26 @@ fn stopping_right_after_the_link_dropped_returns_the_edit() {
     let (_, bytes) = live.stop(&mut session).expect("stop returns the copy");
     assert!(copy_text(&bytes, a).contains("dropped"), "the copy holds the text");
 }
+
+/// The link drops and comes back between two pumps, so the status never left Live and the hub
+/// says connected again (a stale status, L5 re-review 3). An edit made then and closed at once is
+/// never lost: it reaches the room, or it comes back as the copy.
+#[test]
+fn a_drop_and_rejoin_between_pumps_loses_no_edit() {
+    let mut r = Room::new(basic(), 2, 22);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.drop_link(0);
+    r.restore_link(0);
+    assert!(matches!(r.peers[0].live.status(), LiveStatus::Live { .. }), "the status still says Live");
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit");
+    r.peers[0].run("text.insert", json!({"text": "rejoined "})).expect("type");
+    r.peers[0].run("file.close", json!({})).expect("close");
+    let copy = r.peers[0].live.take_unmerged();
+    for _ in 0..8 {
+        r.tick(16);
+        r.pump(1);
+    }
+    let reached = text_of(&r, 1, a).contains("rejoined");
+    let kept = copy.as_ref().is_some_and(|(_, bytes)| copy_text(bytes, a).contains("rejoined"));
+    assert!(reached || kept, "the edit reached the room ({reached}) or is in the copy ({kept})");
+}

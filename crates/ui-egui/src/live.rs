@@ -78,6 +78,9 @@ pub const LINK_ENDED_TEXT: &str = "The link to the other editors ended. Reopen t
 /// Said when the window left the room (a close that was then held back for a waiting copy).
 pub const LIVE_ENDED_TEXT: &str = "Live editing has ended in this window.";
 
+/// Said when a badge is clicked for an editor whose place this window cannot show: `{name}`.
+pub const NO_PLACE_TEXT: &str = "{name}'s place can't be shown yet. It shows again when they select something.";
+
 /// Every English key this module draws, for the translation report.
 pub const ENGLISH_KEYS: &[&str] = &[
     RESTORE_LABEL,
@@ -90,6 +93,7 @@ pub const ENGLISH_KEYS: &[&str] = &[
     ON_SLIDE_NAME,
     LINK_ENDED_TEXT,
     LIVE_ENDED_TEXT,
+    NO_PLACE_TEXT,
 ];
 
 /// The translation lookup for an English key. DeckCraft has no translation catalogue yet, so this
@@ -99,21 +103,25 @@ pub fn tr(key: &str) -> &str {
     key
 }
 
-thread_local! {
-    /// Why the command the ribbon asked about last ([`crate::ribbon::enabled`]) is greyed, for
-    /// the widget drawn for it next.
-    static GATED: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+/// Whether a control is offered, and, when the live gate greys it, why: passed with the control
+/// so the reason reaches exactly that control (no per-thread slot).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Gate {
+    pub on: bool,
+    /// The live reason, an English key, when the live gate refused the command.
+    pub why: Option<&'static str>,
 }
 
-/// Notes why the command just asked about is greyed (None when it is not).
-pub(crate) fn note_gate(why: Option<&'static str>) {
-    GATED.set(why);
+impl From<bool> for Gate {
+    fn from(on: bool) -> Gate {
+        Gate { on, why: None }
+    }
 }
 
-/// Gives a greyed ribbon control the live reason as its tooltip, when the live gate greyed it.
-pub(crate) fn gate_hint(resp: egui::Response, enabled: bool) -> egui::Response {
-    match GATED.take() {
-        Some(why) if !enabled => resp.on_hover_text(tr(why)),
+/// Gives a greyed control the live reason as its tooltip, when the live gate greyed it.
+pub(crate) fn gate_hint(resp: egui::Response, gate: &Gate) -> egui::Response {
+    match gate.why {
+        Some(why) if !gate.on => resp.on_hover_text(tr(why)),
         _ => resp,
     }
 }
@@ -121,10 +129,9 @@ pub(crate) fn gate_hint(resp: egui::Response, enabled: bool) -> egui::Response {
 /// A menu entry for engine command `id`, greyed when it cannot run, with the live reason as its
 /// tooltip when the live gate greyed it.
 pub(crate) fn menu_button(app: &SlideApp, ui: &mut Ui, label: &str, id: &str) -> egui::Response {
-    let r = ui.add_enabled(crate::ribbon::enabled(app, id), egui::Button::new(label));
-    // The reason is shown here; left in the slot it would reach the next ribbon widget.
-    GATED.take();
-    match app.live_refusal(id) {
+    let gate = crate::ribbon::gate(app, id);
+    let r = ui.add_enabled(gate.on, egui::Button::new(label));
+    match gate.why {
         Some(why) => r.on_disabled_hover_text(tr(why)),
         None => r,
     }
@@ -137,6 +144,21 @@ const NOTICES_KEPT: usize = 3;
 /// Commands that add, remove or move slides: in a presentation with sections or custom shows the
 /// room cannot share them yet (L4 review Important 3), so they are greyed with [`SECTIONS_TEXT`].
 const SLIDE_MOVES: &[&str] = &["slide.delete", "slide.duplicate", "slide.move", "slide.new"];
+/// Whether `id` adds or removes slides in the current state, though it is not a slide command:
+/// Cut and Delete with slides selected in the thumbnail pane or the sorter (`edit.delete`'s slide
+/// scope, which the Delete key runs there), and Paste or Duplicate while slides are on the
+/// clipboard and no text is being edited (U1 review M7).
+fn moves_slides(session: &Session, id: &str) -> bool {
+    let Some(st) = session.active() else { return false };
+    let sel = &st.selection;
+    let slides_selected = sel.shapes.is_empty() && sel.text.is_none() && !sel.slides.is_empty();
+    match id {
+        "edit.cut" | "edit.delete" => slides_selected,
+        "edit.paste" | "edit.pasteSpecial" => sel.text.is_none() && !session.clipboard.slides.is_empty(),
+        _ => false,
+    }
+}
+
 /// Window commands that end in an engine command: they are offered as that command is.
 const UI_GATE: &[(&str, &str)] = &[
     ("app.browseThemeDialog", "design.browseTheme"),
@@ -263,7 +285,7 @@ impl LiveUi {
             .iter()
             .find(|d| d.uid == self.live.doc())
             .is_some_and(|d| !d.doc.sections.is_empty() || !d.doc.custom_shows.is_empty());
-        if sections && SLIDE_MOVES.contains(&engine) {
+        if sections && (SLIDE_MOVES.contains(&engine) || moves_slides(session, engine)) {
             return Err(SECTIONS_TEXT);
         }
         self.live.allows(engine).map_err(|why| self.why_not(why))
@@ -317,9 +339,19 @@ impl LiveUi {
 }
 
 impl SlideApp {
-    /// Hands the window a presentation the host opened live on this window's session.
+    /// Hands the window a presentation the host opened live on this window's session. It is
+    /// shown, and it takes the place of the empty presentation host mode started with
+    /// ([`Self::start_for_host`]) when that one is still open, untitled and unchanged.
     pub fn start_live(&mut self, live: LiveDeck) {
+        let doc = live.doc();
         self.live = Some(LiveUi::new(live));
+        let blank = self.host_start.take().filter(|&uid| uid != doc);
+        if let Some(i) = blank.and_then(|uid| self.session.documents().iter().position(|d| d.uid == uid && d.path.is_none() && !d.is_dirty())) {
+            self.session.close_document(i);
+        }
+        if let Some(i) = self.session.documents().iter().position(|d| d.uid == doc) {
+            self.session.set_active(i);
+        }
     }
 
     /// Ends the live session: what the room never got is kept in [`SlideApp::pending_unmerged`]
@@ -338,12 +370,25 @@ impl SlideApp {
     /// once. The desktop shell calls it in `on_exit`.
     pub fn finish_live(&mut self) {
         self.end_live();
+        self.offer_waiting_copies();
+    }
+
+    /// Offers each copy of unmerged edits still waiting once; those the host did not take keep
+    /// waiting (the strip offers them). A web host that keeps the files calls it every frame, so
+    /// a copy goes to the page as soon as it is made (Ruling D18).
+    pub fn offer_waiting_copies(&mut self) {
         let waiting = std::mem::take(&mut self.pending_unmerged);
         for (name, bytes) in waiting {
             if !self.save_unmerged(&name, &bytes) {
                 self.pending_unmerged.push((name, bytes));
             }
         }
+    }
+
+    /// Whether a copy of unmerged edits is waiting to be saved.
+    #[must_use]
+    pub fn copies_waiting(&self) -> bool {
+        !self.pending_unmerged.is_empty()
     }
 
     /// The window is about to close: the live session ends, and waiting copies are offered.
@@ -410,6 +455,15 @@ impl SlideApp {
     /// Hands a copy of unmerged edits to the person: a download on the web, a Save dialog on the
     /// desktop. True when the host took it (downloaded, or written).
     pub(crate) fn save_unmerged(&mut self, name: &str, bytes: &[u8]) -> bool {
+        if let Some(save_copy) = self.services.save_copy.as_mut() {
+            return match save_copy(name, bytes) {
+                Ok(()) => true,
+                Err(e) => {
+                    self.set_status(e);
+                    false
+                }
+            };
+        }
         if let Some(download) = self.services.download.as_mut() {
             download(name, bytes);
             return true;
@@ -438,6 +492,18 @@ impl SlideApp {
     pub(crate) fn live_refusal(&self, id: &str) -> Option<&'static str> {
         let lu = self.live.as_ref().filter(|l| l.applies(&self.session))?;
         lu.gate(&self.session, id).err()
+    }
+
+    /// While the live presentation is active, whether Undo (`edit.undo`) or Redo (`edit.redo`)
+    /// has a command of mine to take back or bring back ([`DeckLive::can_undo`]); None for any
+    /// other id, or when not live.
+    pub(crate) fn live_history(&self, id: &str) -> Option<bool> {
+        let lu = self.live.as_ref().filter(|l| l.applies(&self.session))?;
+        match id {
+            "edit.undo" => Some(lu.live.can_undo()),
+            "edit.redo" => Some(lu.live.can_redo()),
+            _ => None,
+        }
     }
 
     /// Why typing into the live presentation is not taken now, when it is not.
@@ -529,7 +595,7 @@ pub(crate) const STRIP_H: f32 = 30.0;
 
 /// Whether the live strip is drawn this frame.
 pub(crate) fn strip_shown(app: &SlideApp) -> bool {
-    !app.pending_unmerged.is_empty() || app.live.as_ref().is_some_and(|l| l.applies(&app.session))
+    !app.pending_unmerged.is_empty() || (app.backstage.is_none() && app.live.as_ref().is_some_and(|l| l.applies(&app.session)))
 }
 
 /// The live strip above the status bar: status, the newest notice and the other editors; and,
@@ -539,7 +605,7 @@ pub(crate) fn status_strip(app: &mut SlideApp, ui: &mut Ui) {
         return;
     }
     let copy_waiting = !app.pending_unmerged.is_empty();
-    let lu = app.live.as_ref().filter(|l| l.applies(&app.session));
+    let lu = app.live.as_ref().filter(|l| app.backstage.is_none() && l.applies(&app.session));
     let t = Tokens::get(ui.ctx());
     let status = lu.map(LiveUi::status_line);
     let notice = lu.and_then(|l| l.notices.last().cloned());
@@ -604,7 +670,13 @@ pub(crate) fn status_strip(app: &mut SlideApp, ui: &mut Ui) {
             }
         }
         Some(Act::Follow(id)) => {
-            let Some(at) = app.live.as_ref().and_then(|lu| lu.peers.iter().find(|p| p.id == id)).and_then(|p| p.caret.clone()) else { return };
+            let Some(peer) = app.live.as_ref().and_then(|lu| lu.peers.iter().find(|p| p.id == id)).cloned() else { return };
+            // No place to go: the slide they were on was deleted (their caret is dropped until
+            // they select again, L7), or they have selected nothing yet. Say so; nothing broke.
+            let Some(at) = peer.caret.filter(|c| c.slide.is_some()) else {
+                app.set_status(fill(NO_PLACE_TEXT, &[("name", &peer.display)]));
+                return;
+            };
             if let Some(slide) = at.slide {
                 let _ = app.run("slide.go", json!({"index": slide}));
                 if !at.shapes.is_empty() {

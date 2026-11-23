@@ -308,6 +308,12 @@ impl ToolState {
         self.drag.is_some()
     }
 
+    /// Whether the drag under way only selects (a marquee, or dragging over text), so it changes
+    /// nothing in the document.
+    pub fn selecting(&self) -> bool {
+        matches!(self.drag, Some(Drag::Marquee { .. } | Drag::TextSelect { .. }))
+    }
+
     /// The shape in Edit Points, while it is still the one selected shape.
     pub fn editing_points(&self, st: &crate::DocState) -> Option<ShapeId> {
         // Only a freeform has points: after Undo takes the conversion back, Edit Points is over.

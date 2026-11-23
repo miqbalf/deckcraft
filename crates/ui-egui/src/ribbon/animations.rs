@@ -1,5 +1,5 @@
 use super::{
-    Align2, AnimClass, CornerRadius, Icon, Rect, Sense, SlideApp, Tokens, Ui, big, big_button, big_button_ex, dropdown, enabled, group, icons, json,
+    Align2, AnimClass, CornerRadius, Icon, Rect, Sense, SlideApp, Tokens, Ui, big, big_button, big_button_ex, dropdown, gate, group, icons, json,
     pos2, rows, run, theme, vec2, widgets,
 };
 
@@ -142,7 +142,7 @@ pub(super) fn animations(app: &mut SlideApp, ui: &mut Ui) {
             }
         });
         let on = app.session.anim_painter.is_some();
-        let en = enabled(app, "animation.painter");
+        let en = gate(app, "animation.painter");
         let (r, _) = big_button_ex(ui, Icon::AnimationPainter, "Animation\nPainter", en, false, on);
         let r = r.on_hover_text("Animation Painter (double-click to keep it on)");
         if r.double_clicked() {

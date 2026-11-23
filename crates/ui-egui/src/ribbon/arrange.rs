@@ -1,6 +1,4 @@
-use super::{
-    Icon, ShapeId, SlideApp, Ui, big, big_button, big_button_ex, enabled, group, json, menu_item, rows, run, small_button_ex, theme, widgets,
-};
+use super::{Icon, ShapeId, SlideApp, Ui, big, big_button, big_button_ex, gate, group, json, menu_item, rows, run, small_button_ex, theme, widgets};
 
 pub fn arrange_menu(app: &mut SlideApp, ui: &mut Ui) {
     ui.label(egui::RichText::new("Order Objects").font(theme::bold(12.0)));
@@ -50,7 +48,7 @@ pub fn align_menu(app: &mut SlideApp, ui: &mut Ui) {
     menu_item(app, ui, Icon::DistributeH, "Distribute Horizontally", "arrange.distribute", json!({"dir": "horizontal", "to": to}));
     menu_item(app, ui, Icon::DistributeV, "Distribute Vertically", "arrange.distribute", json!({"dir": "vertical", "to": to}));
     ui.separator();
-    let en = enabled(app, "arrange.align");
+    let en = gate(app, "arrange.align");
     for (l, slide) in [("Align to Slide", true), ("Align Selected Objects", false)] {
         if widgets::check_item(ui, l, en, to_slide == slide).clicked() {
             app.align_to = Some((selection.clone(), slide));
@@ -71,7 +69,7 @@ fn align_to_slide(choice: Option<&(Vec<ShapeId>, bool)>, selection: &[ShapeId]) 
 /// Render ordering, align, group/ungroup, and rotate controls for the current selection.
 pub(super) fn arrange_group(app: &mut SlideApp, ui: &mut Ui) {
     group(ui, |ui| {
-        let sel = enabled(app, "arrange.bringForward");
+        let sel = gate(app, "arrange.bringForward");
         let (m, a) = big_button_ex(ui, Icon::BringForward, "Bring\nForward", sel, true, false);
         if m.clicked() {
             run(app, "arrange.bringForward", json!({}));

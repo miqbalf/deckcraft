@@ -119,7 +119,8 @@ pub(super) fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf
     let ev = |kind| PointerEvent { kind, x: p.x, y: p.y, mods: m, tol, pressure };
     let primary = ui.input(|i| i.pointer.primary_pressed());
     // Read-only or paused live presentation: clicks select, but no gesture edits.
-    let refused = app.live_typing_refused().is_some();
+    let refused_why = app.live_typing_refused();
+    let refused = refused_why.is_some();
     // Where the drag was last seen before this frame.
     let seen = app.last_drag_at;
     if app.session.tool.dragging() || primary {
@@ -140,16 +141,24 @@ pub(super) fn pointer(app: &mut SlideApp, ui: &Ui, resp: &egui::Response, xf: Xf
         if refused && !matches!(app.session.tool.kind, ToolKind::Select) {
             // Drawing a shape or ink would edit: not taken while the live presentation is not.
             Ok(serde_json::Value::Null)
+        } else if let Some(why) = refused_why.filter(|_| app.session.painter.is_some() || app.session.anim_painter.is_some()) {
+            // An armed Format or Animation Painter applies on the press: refused up front, with
+            // the reason (U1 review F7), rather than applied and put back by the room.
+            app.set_status(crate::live::tr(why));
+            Ok(serde_json::Value::Null)
         } else {
             let r = app.session.pointer(ev(PointerKind::Down));
-            if refused && app.session.tool.dragging() {
+            if refused && app.session.tool.dragging() && !app.session.tool.selecting() {
                 // A press on a shape or handle selects; the drag it would start is ended where it
-                // began, so nothing moves while the live presentation takes no edits.
+                // began, so nothing moves while the live presentation takes no edits. A marquee or
+                // a drag over text only selects, so it runs (F7).
                 let _ = app.session.pointer(ev(PointerKind::Up));
             }
             r
         }
-    } else if (resp.dragged_by(egui::PointerButton::Primary) && !refused) || (app.session.tool.dragging() && ui.input(|i| i.pointer.primary_down())) {
+    } else if (resp.dragged_by(egui::PointerButton::Primary) && (!refused || app.session.tool.selecting()))
+        || (app.session.tool.dragging() && ui.input(|i| i.pointer.primary_down()))
+    {
         app.session.pointer(ev(PointerKind::Drag))
     } else if app.session.tool.dragging() && ui.input(|i| i.pointer.primary_released() || !i.pointer.primary_down()) {
         // A touch end brings the last move and the release in one frame: drag to the release

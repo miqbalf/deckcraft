@@ -155,4 +155,8 @@ pub struct Services {
     /// A presentation the host opened live ([`deckcraft_live::DeckLive::start`] on this window's
     /// session). The window takes it at its next frame, so a host may also set it later.
     pub live: Option<crate::live::LiveDeck>,
+    /// Web, framed by a page that keeps the files: hands a copy of edits the room could not merge
+    /// to the page as a new file (`saveAs: true`, Ruling D18), while the presentation's own saves
+    /// are off. Tried before `download` and the Save dialog; an error keeps the copy waiting.
+    pub save_copy: Option<WriteFn>,
 }
