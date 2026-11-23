@@ -128,6 +128,31 @@ impl Room {
         room
     }
 
+    /// One more editor joins the room on `bytes`; its index.
+    pub fn join(&mut self, bytes: &[u8]) -> usize {
+        let i = self.peers.len();
+        let uid = format!("user{i}");
+        let hub = self.relay.connect(&uid, &format!("User {i}"), true);
+        let mut session = Session::new();
+        let base = BaseFile { bytes, name: NAME, expected_sha256: None };
+        let mut live = DeckLive::start(hub, ROOM, &base, Access::Edit, &uid, &mut session).expect("start");
+        let c = self.clock.clone();
+        live.set_clock(Box::new(move || c.load(Ordering::Relaxed) as f64));
+        self.peers.push(P { live, session, notices: Vec::new() });
+        self.settle();
+        i
+    }
+
+    /// Peer `i`'s link drops, as a network outage.
+    pub fn drop_link(&self, i: usize) {
+        self.relay.drop_link(self.peers[i].live.core().hub());
+    }
+
+    /// Peer `i`'s link comes back and rejoins.
+    pub fn restore_link(&self, i: usize) {
+        self.relay.restore_link(self.peers[i].live.core().hub());
+    }
+
     fn next(&mut self) -> u64 {
         // xorshift64
         let mut x = self.rng;

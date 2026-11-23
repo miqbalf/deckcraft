@@ -9,7 +9,7 @@ use deckcraft_engine::{EngineError, Session};
 use deckcraft_model::{IdBlock, Presentation, ShapeId, SlideId};
 use serde_json::{Value, json};
 
-use crate::doc::{DeckChange, DeckDoc, TextTarget};
+use crate::doc::{DeckChange, DeckDoc, TextTarget, Tomb};
 use crate::gate::NOT_YET_TEXT;
 use crate::kind::{CaretPos, Deck, DeckCaret, DeckEdit, DeckPos};
 use crate::local::plan;
@@ -17,7 +17,9 @@ use crate::net::unshared;
 use crate::remote::{Targets, land, whole};
 use crate::schema::{id_key, parse_key};
 use crate::session::Notice;
-use crate::split::plan_split;
+use crate::split::{PlannedWrite, plan_split};
+use crate::tomb::{Tombs, inside, line_for, restore_writes, slide_of, slide_tomb, tomb_over, tombstoned};
+use crate::unmerged::Unmerged;
 
 /// The frame one update may fill on the wire (base64 inside its submit), whatever larger cap
 /// a relay advertises (L3 review M5). craft-live does not expose the relay's own cap at this pin;
@@ -85,6 +87,12 @@ pub(crate) struct Mapping {
     pub refused: Option<String>,
     pub notices: Vec<Notice>,
     pub sent: Vec<SentGroup>,
+    /// The base file's name, for the unmerged copy's.
+    pub name: String,
+    /// Tombstones seen and told, my latest groups and the roster's names (L5).
+    pub tombs: Tombs,
+    /// Local edits craft-live was about to drop, for [`crate::DeckLive::take_unmerged`].
+    pub unmerged: Option<Unmerged>,
 }
 
 /// The engine session and the mapping, for one call.
@@ -166,6 +174,111 @@ impl DeckApp<'_> {
     fn current(&self) -> Option<&deckcraft_engine::DocState> {
         self.session.documents().iter().find(|d| d.uid == self.map.doc)
     }
+
+    /// Whether this window's selection or caret is in `t`: a selected shape or the text caret
+    /// inside a deleted shape, or on a deleted slide.
+    fn selected_in(&self, replica: &DeckDoc, t: Tomb) -> bool {
+        let Some(st) = self.current() else { return false };
+        let mut held: Vec<ShapeId> = st.selection.shapes.clone();
+        if let Some(c) = st.selection.text.as_ref().filter(|c| !c.notes) {
+            held.push(c.shape);
+        }
+        match t {
+            Tomb::Shape(g) => held.iter().any(|id| inside(replica, *id, g)),
+            Tomb::Slide(s) => {
+                let on = st.doc.slides.get(st.selection.slide).map(|x| x.id) == Some(s);
+                (on && (!held.is_empty() || st.selection.text.is_some())) || held.iter().any(|id| slide_of(replica, *id) == Some(s))
+            }
+        }
+    }
+
+    /// Remote changes that tombstoned a slide or shape: the person is told, with Restore, when
+    /// their latest work or their selection is in it (Ruling D8). One brought back is forgotten.
+    fn note_deletes(&mut self, replica: &DeckDoc, changes: &[DeckChange]) {
+        let mut targets = BTreeSet::new();
+        for c in changes {
+            match c {
+                DeckChange::Slides(ids) => targets.extend(ids.iter().map(|id| Tomb::Slide(*id))),
+                DeckChange::Shapes(ids) => targets.extend(ids.iter().map(|id| Tomb::Shape(*id))),
+                DeckChange::Text(id) => {
+                    targets.insert(Tomb::Shape(*id));
+                }
+                DeckChange::Notes(id) => {
+                    targets.insert(Tomb::Slide(*id));
+                }
+                DeckChange::Meta => {}
+            }
+        }
+        for t in targets {
+            match tombstoned(replica, t) {
+                Some(by) => {
+                    if self.map.tombs.dead.insert(t) && by != self.map.uid && (self.map.tombs.mine(replica, t) || self.selected_in(replica, t)) {
+                        self.map.tombs.tell(t, &by);
+                    }
+                }
+                None => {
+                    if self.map.tombs.dead.contains(&t) {
+                        self.map.tombs.revived(t);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Restores asked for in this batch, each a group of its own.
+    fn restores(&mut self, replica: &mut DeckDoc, edits: &[DeckEdit], updates: &mut Vec<Vec<u8>>) -> Result<(), LocalError> {
+        for e in edits {
+            let DeckEdit::Restore(t) = e else { continue };
+            let writes = restore_writes(replica, *t, &self.map.uid);
+            if writes.is_empty() {
+                continue;
+            }
+            let bound = wire_bound(writes.iter().map(PlannedWrite::size).sum());
+            let u = replica.write(false, |txn| {
+                for w in &writes {
+                    w.write(txn);
+                }
+                Ok(())
+            });
+            let u = match u {
+                Ok(u) => u,
+                Err(e) => {
+                    log::warn!("deckcraft-live: a restore was refused: {}", e.error);
+                    // Whatever was written goes out; the engine is rebuilt from the replica.
+                    let Some(u) = e.update else { return Err(LocalError::Failed(e.error.to_string())) };
+                    updates.push(u);
+                    self.map.partial = true;
+                    return Ok(());
+                }
+            };
+            let (mut slides, mut shapes) = (BTreeSet::new(), BTreeSet::new());
+            for w in &writes {
+                if let PlannedWrite::Del { target, .. } = w {
+                    self.map.tombs.revived(*target);
+                    match target {
+                        Tomb::Slide(id) => {
+                            slides.insert(*id);
+                        }
+                        Tomb::Shape(id) => {
+                            shapes.insert(*id);
+                            slides.extend(slide_of(replica, *id));
+                        }
+                    }
+                }
+            }
+            self.map.sent.push(SentGroup {
+                slides: slides.iter().copied().collect(),
+                shapes: shapes.iter().copied().collect(),
+                updates: 1,
+                wire: wire_of(&u),
+                bound,
+            });
+            self.map.tombs.wrote(slides.iter().copied(), shapes.iter().copied());
+            self.map.touched.whole.extend(slides);
+            updates.push(u);
+        }
+        Ok(())
+    }
 }
 
 impl LiveApp<Deck> for DeckApp<'_> {
@@ -173,7 +286,7 @@ impl LiveApp<Deck> for DeckApp<'_> {
         let m = &mut *self.map;
         let ours: Vec<&deckcraft_engine::Edited> =
             edits.iter().filter_map(|e| if let DeckEdit::Command(c) = e { Some(c.as_ref()) } else { None }).filter(|c| c.doc == m.doc).collect();
-        if !ours.is_empty() && m.block.is_none() {
+        if !ours.is_empty() && m.space == 0 {
             // No id may be minted before a space is granted (D2 review Minor 2); checked before
             // the safety net, so the reason is the connection, not the minted id.
             m.refused = Some(craft_live::CONNECTING.to_owned());
@@ -193,6 +306,22 @@ impl LiveApp<Deck> for DeckApp<'_> {
             }
         }
         let plans: Vec<_> = ours.iter().map(|c| plan(replica, c, m.space, &m.uid)).collect();
+        // A drop on a shape a peer deleted is refused with the deleter's name (Ruling D6); typed
+        // text still lands in the tombstone (spec "delete beats edit").
+        for (c, p) in ours.iter().zip(&plans) {
+            if !c.command.starts_with("pointer:") {
+                continue;
+            }
+            let dead = p.writes.iter().find_map(|w| match w {
+                PlannedWrite::SetShape { id, .. } | PlannedWrite::Text { target: TextTarget::Shape(id), .. } => tomb_over(replica, *id),
+                _ => None,
+            });
+            if let Some((t, by)) = dead {
+                let why = line_for(t, &m.tombs.name(&by));
+                m.refused = Some(why.clone());
+                return Err(LocalError::Refused(why));
+            }
+        }
         let parts: Vec<Vec<Vec<crate::split::PlannedWrite>>> = plans.iter().map(|p| plan_split(&p.writes)).collect();
         // A part past the frame would be refused by the relay after this replica kept it, which
         // breaks the link: refuse the command before anything is written (L3 review M5). Each
@@ -259,6 +388,20 @@ impl LiveApp<Deck> for DeckApp<'_> {
                     _ => {}
                 }
             }
+            // My own deletes are known; work of mine that landed in a peer's tombstone (held
+            // behind a drag or a composition) is told, with Restore.
+            for w in &p.writes {
+                if let PlannedWrite::Del { target, del: true, .. } = w {
+                    m.tombs.dead.insert(*target);
+                }
+            }
+            let landed_in = shapes.iter().filter_map(|id| tomb_over(replica, *id)).chain(p.slides.iter().filter_map(|id| slide_tomb(replica, *id)));
+            let landed_in: Vec<(Tomb, String)> = landed_in.filter(|(_, by)| *by != m.uid).collect();
+            for (t, by) in landed_in {
+                m.tombs.dead.insert(t);
+                m.tombs.tell(t, &by);
+            }
+            m.tombs.wrote(p.slides.iter().copied(), shapes.iter().copied());
             m.sent.push(SentGroup {
                 slides: p.slides.iter().copied().collect(),
                 shapes: shapes.into_iter().collect(),
@@ -268,6 +411,7 @@ impl LiveApp<Deck> for DeckApp<'_> {
             });
             m.touched.whole.extend(p.slides.iter().copied());
         }
+        self.restores(replica, edits, &mut updates)?;
         Ok(updates)
     }
 
@@ -290,6 +434,7 @@ impl LiveApp<Deck> for DeckApp<'_> {
     }
 
     fn apply(&mut self, replica: &DeckDoc, changes: &[DeckChange]) -> Result<(), String> {
+        self.note_deletes(replica, changes);
         self.land_or_hold(replica, Targets::from_changes(changes))
     }
 
@@ -313,6 +458,10 @@ impl LiveApp<Deck> for DeckApp<'_> {
     }
 
     fn reset(&mut self, space: u32) {
+        // The replica was replaced: what it holds now is the room's, nothing to tell about.
+        self.map.tombs.dead.clear();
+        self.map.tombs.told.clear();
+        self.map.tombs.pending.clear();
         self.map.held = Targets::default();
         self.map.held_since = None;
         self.map.touched = Targets::default();
@@ -328,6 +477,11 @@ impl LiveApp<Deck> for DeckApp<'_> {
         // A new space starts a new block; the old block's ids stay taken (Ruling D5). Until a
         // valid space comes, the engine holds an empty block, which mints nothing.
         m.block = IdBlock::new(space);
+        if m.block.is_none() && space != 0 {
+            // A space past the block range (the relay's counter ran past it): edits go on, and a
+            // minting command is refused with NO_SPACE_TEXT, not CONNECTING (L4 re-review N2).
+            log::warn!("deckcraft-live: the relay granted space {space}, outside the id block range");
+        }
         let block = Some(m.block.clone().unwrap_or_default());
         if let Some(st) = self.session.document_mut(m.doc) {
             // Allocation state, not content: decks compare equal whatever block they hold.
@@ -354,6 +508,12 @@ impl LiveApp<Deck> for DeckApp<'_> {
         });
         let mut c = DeckCaret { slide, shapes, caret, pos: DeckPos { slide: None, shapes: Vec::new(), caret: None } };
         resolve(self.current().map(|d| d.doc.as_ref()), &mut c).then_some(c)
+    }
+
+    fn unmerged(&mut self, state: &[u8], edits: usize) {
+        log::warn!("deckcraft-live: {edits} local edits the room does not have are kept as an unmerged copy");
+        // A later hand-over holds at least what an earlier one did.
+        self.map.unmerged = Some(Unmerged { state: state.to_vec(), at: None });
     }
 
     fn follow(&self, carets: &mut HashMap<String, DeckCaret>) {

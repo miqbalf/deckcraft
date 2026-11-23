@@ -17,6 +17,8 @@ use crate::kind::{Deck, DeckEdit, DeckPos};
 use crate::remote::Targets;
 use crate::schema::MAX_SEED_BYTES;
 use crate::seed::base_sha256;
+use crate::tomb::{Tombs, line_for, tombstoned};
+use crate::unmerged::{copy_bytes, local_now};
 
 /// Another editor, with the selection as the host draws it.
 pub type Peer = LivePeer<DeckPos>;
@@ -78,6 +80,7 @@ pub struct Notice {
 }
 
 type Clock = Box<dyn FnMut() -> f64 + Send>;
+type WallClock = Box<dyn FnMut() -> chrono::NaiveDateTime + Send>;
 
 /// A DeckCraft presentation edited live. Holds `LiveEditing<H, Deck>` directly, so the worker
 /// uses it as it is (Ruling D3).
@@ -89,6 +92,8 @@ pub struct DeckLive<H: Hub> {
     resync_told: bool,
     /// The live presentation was closed here: the session is over.
     closed: bool,
+    /// The person's local date and time, for the unmerged copy's name.
+    wall: Option<WallClock>,
 }
 
 impl<H: Hub> DeckLive<H> {
@@ -146,8 +151,12 @@ impl<H: Hub> DeckLive<H> {
             refused: None,
             notices: Vec::new(),
             sent: Vec::new(),
+            name,
+            tombs: Tombs::default(),
+            unmerged: None,
         };
-        let mut live = DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false, closed: false };
+        let mut live =
+            DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false, closed: false, wall: None };
         if live.clock.lock().unwrap_or_else(PoisonError::into_inner).is_some() {
             live.share_clock();
         }
@@ -214,6 +223,9 @@ impl<H: Hub> DeckLive<H> {
             let mut app = DeckApp { session, map: &mut self.map, now };
             self.core.pump(&mut app)
         };
+        for p in &peers {
+            self.map.tombs.names.insert(craft_live::uid_of(&p.id).to_owned(), p.display.clone());
+        }
         self.after(session, now);
         peers
     }
@@ -235,6 +247,24 @@ impl<H: Hub> DeckLive<H> {
             // reopened file builds a new one.
             self.resync_told = true;
             self.core.end(craft_live::BROKEN);
+        }
+        self.tell_deletes();
+        if let Some(u) = self.map.unmerged.as_mut()
+            && u.at.is_none()
+        {
+            u.at = Some(match self.wall.as_mut() {
+                Some(f) => f(),
+                None => local_now().unwrap_or_else(|| epoch_ms(now)),
+            });
+        }
+    }
+
+    /// The deletes found in this pump, as notices with Restore and the deleter's display name.
+    fn tell_deletes(&mut self) {
+        let pending = std::mem::take(&mut self.map.tombs.pending);
+        for (t, by) in pending {
+            let text = line_for(t, &self.map.tombs.name(&by));
+            self.map.notices.push(Notice { text, restore: Some(t) });
         }
     }
 
@@ -312,6 +342,8 @@ impl<H: Hub> DeckLive<H> {
             let e = e.to_string();
             match (e.contains(deckcraft_engine::cmd::NO_ID_SPACE), self.map.block.is_some()) {
                 (true, true) => NO_SPACE_TEXT.to_owned(),
+                // A space was granted outside the block range: no block will come (N2).
+                (true, false) if self.map.space != 0 => NO_SPACE_TEXT.to_owned(),
                 // No space granted yet: the empty block minted nothing.
                 (true, false) => craft_live::CONNECTING.to_owned(),
                 (false, _) => e,
@@ -358,12 +390,52 @@ impl<H: Hub> DeckLive<H> {
         }
     }
 
-    /// Brings back a deleted slide or shape (L5).
+    /// Brings back a deleted slide or shape: `del = false` for it, for the groups above a shape
+    /// and for its slide when they are deleted too, as one new group. Every peer shows it again,
+    /// with what was typed into it meanwhile. Nothing to do when it is not deleted.
     ///
     /// # Errors
-    /// Not available until L5.
-    pub fn restore(&mut self, _session: &mut Session, _target: Tomb) -> Result<(), String> {
-        Err(NOT_YET_TEXT.to_owned())
+    /// Why it cannot be done now (the link, read-only, closed).
+    pub fn restore(&mut self, session: &mut Session, target: Tomb) -> Result<(), String> {
+        if self.closed {
+            return Err(CLOSED_TEXT.to_owned());
+        }
+        if !self.core.editable() {
+            return Err(self.core.not_editable());
+        }
+        if self.replica().is_none_or(|r| tombstoned(r, target).is_none()) {
+            return Ok(());
+        }
+        self.map.refused = None;
+        self.core.queue().push(DeckEdit::Restore(target));
+        self.flush(session);
+        match self.map.refused.take() {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    }
+
+    /// The `.pptx` bytes of the base + this replica's state, with the local edits craft-live was
+    /// about to drop (a reset, a replica given up), and the copy's name ([`unmerged_name`]);
+    /// None otherwise. Taken once.
+    ///
+    /// [`unmerged_name`]: crate::unmerged_name
+    pub fn take_unmerged(&mut self) -> Option<(String, Vec<u8>)> {
+        let u = self.map.unmerged.take()?;
+        let at = u.at.or_else(local_now).unwrap_or_default();
+        match copy_bytes(&self.map.base, &u.state) {
+            Ok(bytes) => Some((crate::unmerged::unmerged_name(&self.map.name, at), bytes)),
+            Err(e) => {
+                log::warn!("deckcraft-live: the unmerged copy could not be built: {e}");
+                None
+            }
+        }
+    }
+
+    /// The person's local date and time, for the unmerged copy's name (a browser host passes
+    /// the page's; native hosts have the system's by default).
+    pub fn set_wall_clock(&mut self, clock: Box<dyn FnMut() -> chrono::NaiveDateTime + Send>) {
+        self.wall = Some(clock);
     }
 
     /// The clock the link and the hold budget run on, in ms (a browser host passes the page's).
@@ -427,6 +499,13 @@ impl<H: Hub> DeckLive<H> {
             Arc::make_mut(&mut st.doc).id_block = None;
         }
     }
+}
+
+/// `ms` on the session's clock read as Unix time (a web host's page clock), when nothing better
+/// is known.
+fn epoch_ms(ms: f64) -> chrono::NaiveDateTime {
+    let ms = ms as i64;
+    chrono::DateTime::from_timestamp_millis(ms).map(|d| d.naive_utc()).unwrap_or_default()
 }
 
 #[cfg(not(target_arch = "wasm32"))]

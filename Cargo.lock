@@ -1090,7 +1090,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=d0193d7e94b5ec180ecc2a
 [[package]]
 name = "craft-collab"
 version = "0.1.0"
-source = "git+https://github.com/miqbalf/collab-craft?rev=e29e9582c1cf3d8e8d72b9e73409312ce4095866#e29e9582c1cf3d8e8d72b9e73409312ce4095866"
+source = "git+https://github.com/miqbalf/collab-craft?rev=22867b0e3f89c737c32d1dab1c05a268789d39c2#22867b0e3f89c737c32d1dab1c05a268789d39c2"
 dependencies = [
  "base64 0.23.1",
  "log",
@@ -1156,7 +1156,7 @@ dependencies = [
 [[package]]
 name = "craft-live"
 version = "0.1.0"
-source = "git+https://github.com/miqbalf/collab-craft?rev=e29e9582c1cf3d8e8d72b9e73409312ce4095866#e29e9582c1cf3d8e8d72b9e73409312ce4095866"
+source = "git+https://github.com/miqbalf/collab-craft?rev=22867b0e3f89c737c32d1dab1c05a268789d39c2#22867b0e3f89c737c32d1dab1c05a268789d39c2"
 dependencies = [
  "craft-collab",
  "log",
@@ -1566,6 +1566,7 @@ dependencies = [
 name = "deckcraft-live"
 version = "0.19.0"
 dependencies = [
+ "chrono",
  "craft-collab",
  "craft-live",
  "deckcraft-engine",

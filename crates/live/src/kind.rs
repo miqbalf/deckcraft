@@ -16,12 +16,14 @@ pub struct Deck;
 #[derive(Clone, Debug)]
 pub enum DeckEdit {
     /// A change the engine reported: one outer command, a pointer gesture at its drop, or an input
-    /// method's commit. [`Edited::command`] is a label only; the mapping never keys on it.
+    /// method's commit. [`Edited::command`] is a label; the mapping reads only its `pointer:` prefix, to refuse a drop on a deleted shape (L5).
     Command(Box<Edited>),
     /// The person asked for Undo (the engine's live undo hook).
     Undo,
     /// The person asked for Redo.
     Redo,
+    /// Bring back a deleted slide or shape (`del = false`), as a group of its own (L5).
+    Restore(crate::doc::Tomb),
 }
 
 /// Where another editor is, as the host draws it: the slide's index now, the selected shapes and

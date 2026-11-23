@@ -107,7 +107,7 @@ impl std::fmt::Display for WriteError {
 impl std::error::Error for WriteError {}
 
 /// A slide or shape to tombstone or bring back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Tomb {
     Slide(SlideId),
     Shape(ShapeId),
@@ -390,13 +390,16 @@ impl DeckDoc {
         let txn = self.y.doc().transact();
         let mut bad = BTreeSet::new();
         let e = match Roots::entry(&self.roots.slides, &txn, id.0) {
-            Some(m) => SlideEntry {
-                pos: read_order(&m, &txn, POS).or(POS, String::new(), String::new(), &mut bad),
-                del: read_bool(&m, &txn, DEL).or(DEL, false, false, &mut bad),
-                del_by: read_by(&m, &txn).or(DEL_BY, None, None, &mut bad),
-                layout: LayoutId(read_id(&m, &txn, LAYOUT).or(LAYOUT, 0, 0, &mut bad)),
-                fields: read_fields(&m, &txn, &SLIDE_FIELDS, &mut bad, |k, v| apply_slide_field(&mut Slide::default(), k, v)),
-            },
+            Some(m) => {
+                let del_by = read_by(&m, &txn).or(DEL_BY, None, None, &mut bad);
+                SlideEntry {
+                    pos: read_order(&m, &txn, POS).or(POS, String::new(), String::new(), &mut bad),
+                    del: read_del(&m, &txn, del_by.is_some(), &mut bad),
+                    del_by,
+                    layout: LayoutId(read_id(&m, &txn, LAYOUT).or(LAYOUT, 0, 0, &mut bad)),
+                    fields: read_fields(&m, &txn, &SLIDE_FIELDS, &mut bad, |k, v| apply_slide_field(&mut Slide::default(), k, v)),
+                }
+            }
             None if self.roots.slides.get(&txn, &id_key(id.0)).is_some() => {
                 log::warn!("deckcraft-live: a slide entry is not a map; the base's slide is used");
                 bad.extend([POS, DEL, LAYOUT]);
@@ -419,12 +422,13 @@ impl DeckDoc {
                     let mut s = Shape { text: Some(TextBody::default()), ..Default::default() };
                     apply_shape_field(&mut s, k, v)
                 });
+                let del_by = read_by(&m, &txn).or(DEL_BY, None, None, &mut bad);
                 ShapeEntry {
                     slide: SlideId(read_id(&m, &txn, SLIDE).or(SLIDE, 0, 0, &mut bad)),
                     parent: (parent != 0).then_some(ShapeId(parent)),
                     z: read_order(&m, &txn, Z).or(Z, String::new(), String::new(), &mut bad),
-                    del: read_bool(&m, &txn, DEL).or(DEL, false, false, &mut bad),
-                    del_by: read_by(&m, &txn).or(DEL_BY, None, None, &mut bad),
+                    del: read_del(&m, &txn, del_by.is_some(), &mut bad),
+                    del_by,
                     // A text body is there when `body` is (Ruling D26 as amended in L3 fix round 1).
                     has_text: fields.contains_key(BODY),
                     fields,
@@ -938,6 +942,13 @@ fn read_bool<T: ReadTxn>(m: &MapRef, txn: &T, key: &str) -> Read<bool> {
         Some(Out::Any(Any::Bool(b))) => Read::Good(b),
         Some(_) => Read::Junk,
     }
+}
+
+/// `del`; a junk value reads as deleted when the entry names a deleter (`delBy` is written with
+/// every delete and removed by every restore), so a peer's junk cannot revive a tombstone (L3
+/// review), and as live otherwise.
+fn read_del<T: ReadTxn>(m: &MapRef, txn: &T, by: bool, bad: &mut BTreeSet<&'static str>) -> bool {
+    read_bool(m, txn, DEL).or(DEL, false, by, bad)
 }
 
 fn read_by<T: ReadTxn>(m: &MapRef, txn: &T) -> Read<Option<String>> {

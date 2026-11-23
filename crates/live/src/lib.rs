@@ -22,6 +22,8 @@ pub mod seed;
 pub mod session;
 pub mod split;
 pub mod text;
+pub mod tomb;
+pub mod unmerged;
 
 pub use app::{EDIT_TOO_LARGE_TEXT, FRAME, SentGroup, WIRE_LIMIT};
 pub use build::{deck_from_doc, deck_from_state};
@@ -32,3 +34,5 @@ pub use net::{COPY_UNSHARED_TEXT, SECTIONS_TEXT, unshared};
 pub use schema::{MAX_SEED_BYTES, UPDATE_BUDGET, schema};
 pub use session::{BaseFile, CLOSED_TEXT, DeckLive, LiveFail, NO_SPACE_TEXT, Notice, PAUSED_TEXT, Peer, READ_ONLY_TEXT, TOO_LARGE_TEXT};
 pub use split::{PlannedWrite, plan_split};
+pub use tomb::{RESTORE_LABEL, deleted_slide_text, deleted_text};
+pub use unmerged::unmerged_name;

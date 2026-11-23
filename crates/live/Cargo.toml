@@ -26,6 +26,12 @@ serde_json = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
+# The unmerged copy's name (`unmerged_name`).
+chrono = { workspace = true }
+
+# The local wall clock for the unmerged copy's name (no clock on wasm: the host gives one).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+chrono = { workspace = true, features = ["clock"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
