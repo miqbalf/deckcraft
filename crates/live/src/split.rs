@@ -22,12 +22,37 @@ const KEY_COST: usize = 48;
 /// One write a command plans, applied through [`DeckTxn`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlannedWrite {
-    PutSlide { slide: Arc<Slide>, pos: String },
-    SetSlide { id: SlideId, key: String, value: Value },
-    PutShape { slide: SlideId, parent: Option<ShapeId>, z: String, shape: Box<Shape> },
-    SetShape { id: ShapeId, key: String, value: Value },
-    Del { target: Tomb, del: bool, by: String },
-    Text { target: TextTarget, ops: Vec<TextOp> },
+    PutSlide {
+        slide: Arc<Slide>,
+        pos: String,
+    },
+    SetSlide {
+        id: SlideId,
+        key: String,
+        value: Value,
+    },
+    /// One shape entry. A group's children are not written with it (its `kind` goes without
+    /// them): each descendant needs its own `PutShape` with `parent` set to its group.
+    PutShape {
+        slide: SlideId,
+        parent: Option<ShapeId>,
+        z: String,
+        shape: Box<Shape>,
+    },
+    SetShape {
+        id: ShapeId,
+        key: String,
+        value: Value,
+    },
+    Del {
+        target: Tomb,
+        del: bool,
+        by: String,
+    },
+    Text {
+        target: TextTarget,
+        ops: Vec<TextOp>,
+    },
 }
 
 /// The entry a write belongs to.
@@ -67,7 +92,12 @@ impl PlannedWrite {
         match self {
             PlannedWrite::PutSlide { slide, pos } => KEY_COST * 12 + pos.len() + json(slide.as_ref()),
             PlannedWrite::SetSlide { key, value, .. } | PlannedWrite::SetShape { key, value, .. } => KEY_COST + key.len() + json(value),
-            PlannedWrite::PutShape { z, shape, .. } => KEY_COST * 26 + z.len() + json(shape.as_ref()),
+            // What `put_shape` writes: the entry's own keys (a group's without its children) and
+            // the text body.
+            PlannedWrite::PutShape { z, shape, .. } => {
+                let keys: usize = crate::doc::shape_values(shape).iter().map(|(k, v)| KEY_COST + k.len() + json(v)).sum();
+                KEY_COST * 6 + z.len() + keys + shape.text.as_ref().map_or(0, |t| json(&t.paragraphs))
+            }
             PlannedWrite::Del { by, .. } => KEY_COST * 2 + by.len(),
             PlannedWrite::Text { ops, .. } => ops.iter().map(op_size).sum(),
         }

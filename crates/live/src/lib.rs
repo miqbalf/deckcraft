@@ -16,6 +16,6 @@ pub mod split;
 pub mod text;
 
 pub use build::{deck_from_doc, deck_from_state, delete_shapes_in};
-pub use doc::{DeckChange, DeckDoc, DeckSeed, DeckTxn, KeyRef, ShapeEntry, SlideEntry, TextTarget, Tomb};
+pub use doc::{DeckChange, DeckDoc, DeckSeed, DeckTxn, KeyRef, ShapeEntry, SlideEntry, TextTarget, Tomb, WriteError};
 pub use schema::{MAX_SEED_BYTES, UPDATE_BUDGET, schema};
 pub use split::{PlannedWrite, plan_split};

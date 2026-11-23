@@ -5,10 +5,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use craft_collab::{LiveError, Replica};
-use deckcraft_model::text::Paragraph;
-use deckcraft_model::{Presentation, Shape, ShapeId, ShapeKind, Slide, SlideId};
+use deckcraft_model::text::{Paragraph, TextBody};
+use deckcraft_model::{LayoutId, Presentation, Shape, ShapeId, ShapeKind, Slide, SlideId};
 
-use crate::doc::{DeckDoc, TextTarget, apply_shape_field, apply_slide_field};
+use crate::doc::{DeckDoc, ShapeEntry, TextTarget, apply_shape_field, apply_slide_field, tree_in};
+use crate::schema::{BODY, DEL, LAYOUT, PARENT, POS, SLIDE, Z};
 
 /// The deck for `state` over `base`: equal for equal (base, state) on every target.
 pub fn deck_from_state(base: &Presentation, state: &[u8]) -> Result<Presentation, LiveError> {
@@ -16,39 +17,98 @@ pub fn deck_from_state(base: &Presentation, state: &[u8]) -> Result<Presentation
     Ok(deck_from_doc(base, &doc))
 }
 
-/// The deck a live replica describes, with no encode. Values a peer wrote as junk read as the
-/// earlier good value this replica saw (as the base's when it saw none).
+/// Where the seed put a base shape: its slide, its parent and its `z`.
+type Placed = (SlideId, Option<ShapeId>, String);
+
+/// The base's slides and shapes, and where the seed put them (`pos` and `z` from `seed_keys`).
+struct Base<'a> {
+    slides: HashMap<SlideId, (&'a Arc<Slide>, String)>,
+    shapes: HashMap<ShapeId, (&'a Shape, Placed)>,
+}
+
+impl<'a> Base<'a> {
+    fn of(p: &'a Presentation) -> Base<'a> {
+        fn rec<'a>(out: &mut HashMap<ShapeId, (&'a Shape, Placed)>, slide: SlideId, parent: Option<ShapeId>, shapes: &'a [Shape], depth: usize) {
+            if depth > 64 {
+                return;
+            }
+            for (s, z) in shapes.iter().zip(crate::order::seed_keys(shapes.len())) {
+                out.entry(s.id).or_insert((s, (slide, parent, z)));
+                rec(out, slide, Some(s.id), s.children(), depth + 1);
+            }
+        }
+        let pos = crate::order::seed_keys(p.slides.len());
+        let mut shapes = HashMap::new();
+        for s in &p.slides {
+            rec(&mut shapes, s.id, None, &s.shapes, 0);
+        }
+        Base { slides: p.slides.iter().zip(pos).map(|(s, pos)| (s.id, (s, pos))).collect(), shapes }
+    }
+}
+
+/// The deck a replica describes, with no encode. A key holding a peer's junk reads as the base's
+/// value (the default for a new entry), so the result is a function of (base, state):
+/// `deck_from_doc(base, doc) == deck_from_state(base, &doc.state())`.
 ///
 /// `next_id` stays the base's: ids minted live sit at or above `LIVE_ID_BASE` and are never
 /// counted into it, so a block-less session over the result keeps minting below the live range.
 #[must_use]
 pub fn deck_from_doc(base: &Presentation, doc: &DeckDoc) -> Presentation {
     let mut out = base.clone();
-    let base_slides: HashMap<SlideId, &Arc<Slide>> = base.slides.iter().map(|s| (s.id, s)).collect();
-    let mut base_shapes: HashMap<ShapeId, &Shape> = HashMap::new();
-    for s in &base.slides {
-        deckcraft_model::walk(&s.shapes, &mut |sh, _| {
-            base_shapes.entry(sh.id).or_insert(sh);
-        });
+    let b = Base::of(base);
+    // The entries with junk core keys put back to the base's.
+    let mut order = Vec::new();
+    for (id, e) in doc.slide_entries() {
+        let junk = doc.slide_junk(*id);
+        let bad = |k: &str| junk.is_some_and(|j| j.contains(k));
+        let del = e.del && !bad(DEL);
+        let pos = if bad(POS) { b.slides.get(id).map(|(_, p)| p.clone()).unwrap_or_default() } else { e.pos.clone() };
+        if !del {
+            order.push((*id, pos));
+        }
+    }
+    let mut shapes: BTreeMap<ShapeId, ShapeEntry> = BTreeMap::new();
+    for (id, e) in doc.shape_entries() {
+        let mut e = e.clone();
+        if let Some(junk) = doc.shape_junk(*id) {
+            let placed = b.shapes.get(id).map(|(_, p)| p);
+            if junk.contains(SLIDE) {
+                e.slide = placed.map_or(SlideId(0), |p| p.0);
+            }
+            if junk.contains(PARENT) {
+                e.parent = placed.and_then(|p| p.1);
+            }
+            if junk.contains(Z) {
+                e.z = placed.map(|p| p.2.clone()).unwrap_or_default();
+            }
+            if junk.contains(DEL) {
+                e.del = false;
+            }
+        }
+        shapes.insert(*id, e);
     }
     let mut slides = Vec::new();
     let mut tombs = Vec::new();
-    for id in doc.slide_order() {
+    for id in crate::order::order(order) {
         let Some(e) = doc.slide(id) else { continue };
-        let earlier = base_slides.get(&id).map(|s| s.as_ref());
+        let earlier = b.slides.get(&id).map(|(s, _)| s.as_ref());
         let mut slide = earlier.cloned().unwrap_or_else(|| Slide { id, ..Default::default() });
-        slide.layout = e.layout;
+        if !doc.slide_junk(id).is_some_and(|j| j.contains(LAYOUT)) {
+            slide.layout = e.layout;
+        } else if earlier.is_none() {
+            slide.layout = LayoutId(0);
+        }
         for (k, v) in &e.fields {
             apply_slide_field(&mut slide, k, v);
         }
         if let Some(ps) = doc.text(TextTarget::Notes(id)) {
             slide.notes.paragraphs = keep_base(&slide.notes.paragraphs, ps);
         }
-        let (shapes, dead) = build_tree(doc, id, &base_shapes);
-        slide.shapes = shapes;
+        let (built, dead) = build_tree(doc, &shapes, id, &b);
+        slide.shapes = built;
         tombs.push(dead);
-        let slide = match base_slides.get(&id) {
-            Some(b) if b.as_ref() == &slide => Arc::clone(b),
+        let slide = match b.slides.get(&id) {
+            Some((s, _)) if s.as_ref() == &slide => Arc::clone(s),
             _ => Arc::new(slide),
         };
         slides.push(slide);
@@ -74,49 +134,43 @@ fn keep_base(base: &[Paragraph], live: Vec<Paragraph>) -> Vec<Paragraph> {
     if same { base.to_vec() } else { live }
 }
 
+type Kids = BTreeMap<Option<ShapeId>, Vec<(ShapeId, String)>>;
+
 /// The slide's shape tree, tombstones included, and the tombstoned ids.
-fn build_tree(doc: &DeckDoc, slide: SlideId, base: &HashMap<ShapeId, &Shape>) -> (Vec<Shape>, Vec<ShapeId>) {
-    let mut kids: BTreeMap<Option<ShapeId>, Vec<(ShapeId, String)>> = BTreeMap::new();
+fn build_tree(doc: &DeckDoc, shapes: &BTreeMap<ShapeId, ShapeEntry>, slide: SlideId, base: &Base) -> (Vec<Shape>, Vec<ShapeId>) {
+    let mut kids: Kids = BTreeMap::new();
     let mut dead = Vec::new();
-    for (id, parent) in doc.tree_of(slide) {
-        if let Some(e) = doc.shape(id) {
+    for (id, parent) in tree_in(shapes, slide) {
+        if let Some(e) = shapes.get(&id) {
             if e.del {
                 dead.push(id);
             }
-            kids.entry(parent).or_default().push((id, e.z));
+            kids.entry(parent).or_default().push((id, e.z.clone()));
         }
     }
-    let shapes = build_level(doc, &kids, None, base, 0);
-    (shapes, dead)
+    let built = build_level(doc, shapes, &kids, None, base, 0);
+    (built, dead)
 }
 
-fn build_level(
-    doc: &DeckDoc,
-    kids: &BTreeMap<Option<ShapeId>, Vec<(ShapeId, String)>>,
-    at: Option<ShapeId>,
-    base: &HashMap<ShapeId, &Shape>,
-    depth: usize,
-) -> Vec<Shape> {
+fn build_level(doc: &DeckDoc, shapes: &BTreeMap<ShapeId, ShapeEntry>, kids: &Kids, at: Option<ShapeId>, base: &Base, depth: usize) -> Vec<Shape> {
     let Some(list) = kids.get(&at) else { return Vec::new() };
-    crate::order::order(list.iter().cloned()).into_iter().filter_map(|id| build_shape(doc, kids, id, base, depth)).collect()
+    crate::order::order(list.iter().cloned()).into_iter().filter_map(|id| build_shape(doc, shapes, kids, id, base, depth)).collect()
 }
 
-fn build_shape(
-    doc: &DeckDoc,
-    kids: &BTreeMap<Option<ShapeId>, Vec<(ShapeId, String)>>,
-    id: ShapeId,
-    base: &HashMap<ShapeId, &Shape>,
-    depth: usize,
-) -> Option<Shape> {
-    let e = doc.shape(id)?;
-    let earlier = base.get(&id).copied();
+fn build_shape(doc: &DeckDoc, shapes: &BTreeMap<ShapeId, ShapeEntry>, kids: &Kids, id: ShapeId, base: &Base, depth: usize) -> Option<Shape> {
+    let e = shapes.get(&id)?;
+    let earlier = base.shapes.get(&id).map(|(s, _)| *s);
     let mut s = earlier.cloned().unwrap_or_else(|| Shape { id, ..Default::default() });
-    if e.has_text {
-        let ps = doc.text(TextTarget::Shape(id)).unwrap_or_default();
-        let mut t = s.text.take().unwrap_or_default();
-        t.paragraphs = keep_base(&t.paragraphs, ps);
-        s.text = Some(t);
-    } else if !doc.text_is_junk(id) {
+    // A text body is there when `body` is (D26 as amended); a junk `body` keeps the base's.
+    let body_junk = doc.shape_junk(id).is_some_and(|j| j.contains(BODY));
+    if e.has_text || body_junk {
+        if e.has_text && s.text.is_none() {
+            s.text = Some(TextBody::default());
+        }
+        if let (Some(t), Some(ps)) = (s.text.as_mut(), doc.text(TextTarget::Shape(id))) {
+            t.paragraphs = keep_base(&t.paragraphs, ps);
+        }
+    } else {
         s.text = None;
     }
     // Every value in the index already read as its type; `body` lands only in a text body.
@@ -124,7 +178,7 @@ fn build_shape(
         apply_shape_field(&mut s, k, v);
     }
     if let ShapeKind::Group { children, .. } = &mut s.kind {
-        *children = if depth < 64 { build_level(doc, kids, Some(id), base, depth + 1) } else { Vec::new() };
+        *children = if depth < 64 { build_level(doc, shapes, kids, Some(id), base, depth + 1) } else { Vec::new() };
     }
     Some(s)
 }

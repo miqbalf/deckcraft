@@ -315,52 +315,156 @@ fn junk_remote_values_do_not_brick_the_room() {
     let base = mixed();
     let seeded = DeckDoc::seeded(&seed_of(&base)).expect("seed");
     let (mut a, mut b, mut c) = (peer(&seeded, 3), peer(&seeded, 4), peer(&seeded, 5));
-    let id = base.slides[0].shapes[0].id;
-    let good = json!(Xfrm::new(11.0, 12.0, 13.0, 14.0));
-    let u = a.write(false, |t| {
-        t.set_shape(id, "xfrm", good.clone());
-        Ok(())
-    });
-    let u = u.expect("write");
+    let slide = &base.slides[0];
+    let id = slide.shapes[0].id;
+    let group = slide.shapes.iter().find(|s| s.is_group()).expect("group");
+    let child = group.children()[0].id;
+    let u = a
+        .write(false, |t| {
+            t.set_shape(id, "xfrm", json!(Xfrm::new(11.0, 12.0, 13.0, 14.0)));
+            Ok(())
+        })
+        .expect("write");
     b.apply(&u).expect("apply");
     c.apply(&u).expect("apply");
-    let before = b.shape(id).expect("entry");
-    let deck_before = deck_from_doc(&base, &b);
     let junk = c
         .write(false, |t| {
             t.set_shape(id, "xfrm", json!("x"));
             t.set_shape(id, "z", json!(7));
             t.set_shape(id, "kind", json!({"type": "garbage", "what": [1, 2]}));
             t.set_shape(id, "del", json!("maybe"));
+            t.set_shape(id, "slide", json!("nowhere"));
+            t.set_shape(id, "body", json!(5));
             t.set_shape(id, "text", json!(42));
+            t.set_shape(child, "parent", json!([1]));
+            t.set_slide(slide.id, "pos", json!(9));
+            t.set_slide(slide.id, "layout", json!("l"));
+            t.set_slide(slide.id, "del", json!({}));
             Ok(())
         })
         .expect("junk");
     assert!(b.apply(&junk).is_ok(), "junk is not a refused update");
-    let after = b.shape(id).expect("entry");
-    assert_eq!(after.fields.get("xfrm"), Some(&good), "the earlier xfrm is kept");
-    assert_eq!(after.z, before.z);
-    assert_eq!(after.fields.get("kind"), before.fields.get("kind"));
-    assert_eq!(after.slide, before.slide);
-    assert_eq!(after.del, before.del);
-    assert_eq!(deck_from_doc(&base, &b), deck_before, "the reader keeps the earlier values");
-    // A replica that never saw a good value reads the base's.
-    let fresh = deck_from_state(&base, &b.state()).expect("rebuild");
-    let (got, want) = (fresh.slides[0].shape(id).expect("shape"), base.slides[0].shape(id).expect("shape"));
-    assert_eq!((got.xfrm, &got.kind, &got.text), (want.xfrm, &want.kind, &want.text), "junk reads as the base's");
+    let live = deck_from_doc(&base, &b);
+    // History-free: a replica built from the state alone reads the same (Minor 2).
+    assert_eq!(live, deck_from_state(&base, &b.state()).expect("rebuild"), "live and rebuilt agree after junk");
+    // Every junk key, core keys too, reads as the base's (Minor 3).
+    assert_eq!(live.slides.iter().map(|s| s.id).collect::<Vec<_>>(), base.slides.iter().map(|s| s.id).collect::<Vec<_>>());
+    let (got, want) = (&live.slides[0], &base.slides[0]);
+    assert_eq!(got.layout, want.layout);
+    assert_eq!(got.shapes.iter().map(|s| s.id).collect::<Vec<_>>(), want.shapes.iter().map(|s| s.id).collect::<Vec<_>>(), "same shapes, same order");
+    let (gs, ws) = (got.shape(id).expect("shape"), want.shape(id).expect("shape"));
+    assert_eq!((gs.xfrm, &gs.kind, &gs.text), (ws.xfrm, &ws.kind, &ws.text), "junk reads as the base's");
+    assert!(got.shape(group.id).expect("group").children().iter().any(|s| s.id == child), "the child stays in its group");
     // The next good write applies.
-    let better = json!(Xfrm::new(21.0, 22.0, 23.0, 24.0));
+    let better = Xfrm::new(21.0, 22.0, 23.0, 24.0);
     let u = c
         .write(false, |t| {
-            t.set_shape(id, "xfrm", better.clone());
-            t.set_shape(id, "z", json!(before.z));
+            t.set_shape(id, "xfrm", json!(better));
             Ok(())
         })
         .expect("write");
     assert_eq!(b.apply(&u).expect("apply"), vec![DeckChange::Shapes(vec![id])]);
-    assert_eq!(b.shape(id).expect("entry").fields.get("xfrm"), Some(&better));
-    let xfrm = deck_from_doc(&base, &b).slides[0].shape(id).and_then(|s| s.xfrm);
-    assert_eq!(xfrm, Some(Xfrm::new(21.0, 22.0, 23.0, 24.0)));
+    assert_eq!(deck_from_doc(&base, &b).slides[0].shape(id).and_then(|s| s.xfrm), Some(better));
+}
+
+/// A shape with no text body: both peers start typing into it at once. The YText exists from the
+/// seed, so both texts merge (L3 fix round 1, Important 1).
+#[test]
+fn two_peers_starting_a_text_body_keep_both_texts() {
+    let base = mixed();
+    let left = base.slides[0].shapes.iter().find(|s| s.name == "Left").expect("left");
+    assert!(left.text.is_none(), "the shape starts without a text body");
+    let seeded = DeckDoc::seeded(&seed_of(&base)).expect("seed");
+    let (mut a, mut b) = (peer(&seeded, 3), peer(&seeded, 4));
+    let body = |who: &str| TextBody::from_text(who);
+    let start = |d: &mut DeckDoc, who: &str| -> Vec<Vec<u8>> {
+        let after = body(who);
+        let key = d
+            .write(false, |t| {
+                t.set_shape(left.id, "body", json!({"body": after.body}));
+                Ok(())
+            })
+            .expect("body");
+        let text = d
+            .write(true, |t| {
+                t.text_ops(TextTarget::Shape(left.id), &edit_ops(&[], &after.paragraphs));
+                Ok(())
+            })
+            .expect("text");
+        vec![key, text]
+    };
+    let from_a = start(&mut a, "alice");
+    let from_b = start(&mut b, "bob");
+    for u in &from_b {
+        a.apply(u).expect("apply");
+    }
+    for u in &from_a {
+        b.apply(u).expect("apply");
+    }
+    let (da, db) = (deck_from_doc(&base, &a), deck_from_doc(&base, &b));
+    assert_eq!(da, db, "both peers converge");
+    let text = da.slides[0].shape(left.id).and_then(|s| s.text.as_ref()).map(TextBody::text).expect("a text body");
+    assert!(text.contains("alice") && text.contains("bob"), "both texts survive: {text:?}");
+}
+
+/// Undoing the first keystroke into a new text body keeps a peer's later text (Important 1).
+#[test]
+fn undoing_the_first_keystroke_keeps_a_peer_s_later_text() {
+    let base = mixed();
+    let right = base.slides[0].shapes.iter().find(|s| s.name == "Right").expect("right");
+    let seeded = DeckDoc::seeded(&seed_of(&base)).expect("seed");
+    let (mut a, mut b) = (peer(&seeded, 3), peer(&seeded, 4));
+    let target = TextTarget::Shape(right.id);
+    let first = a
+        .write(true, |t| {
+            t.text_ops(target.clone(), &[TextOp::Insert { at: 0, chunks: vec![Chunk::Text { text: "a\n".into(), attrs: vec![] }] }]);
+            Ok(())
+        })
+        .expect("type");
+    b.apply(&first).expect("apply");
+    let later = b
+        .write(true, |t| {
+            t.text_ops(target.clone(), &[TextOp::Insert { at: 1, chunks: vec![Chunk::Text { text: " from bob".into(), attrs: vec![] }] }]);
+            Ok(())
+        })
+        .expect("type");
+    a.apply(&later).expect("apply");
+    let undo = a.undo_text().expect("undo");
+    b.apply(&undo).expect("apply");
+    for d in [&a, &b] {
+        let text: String = d.text(target.clone()).expect("text").iter().map(|p| p.text()).collect();
+        assert!(text.contains("from bob"), "bob's text stays: {text:?}");
+        assert!(!text.starts_with('a'), "alice's keystroke is undone: {text:?}");
+    }
+}
+
+/// `f` writes and then errs: the update for what it wrote is still handed out, the receiver
+/// converges, and later updates from that client do not wait (Important 2).
+#[test]
+fn a_write_that_errs_after_writing_still_hands_out_its_update() {
+    let base = mixed();
+    let title = base.slides[0].shapes[0].id;
+    let seeded = DeckDoc::seeded(&seed_of(&base)).expect("seed");
+    let (mut a, mut b) = (peer(&seeded, 3), peer(&seeded, 4));
+    let failed = a.write(false, |t| {
+        t.set_shape(title, "name", json!("half"));
+        Err(craft_collab::LiveError::OutOfRange)
+    });
+    let err = failed.expect_err("f erred");
+    assert_eq!(err.error, craft_collab::LiveError::OutOfRange);
+    let update = err.update.expect("what f wrote is handed out");
+    b.apply(&update).expect("apply");
+    let refused = a.write(false, |_| Err(craft_collab::LiveError::OutOfRange)).expect_err("erred");
+    assert!(refused.update.is_none(), "nothing written, nothing to send");
+    let next = a
+        .write(false, |t| {
+            t.set_shape(title, "descr", json!("after"));
+            Ok(())
+        })
+        .expect("write");
+    assert_eq!(b.apply(&next).expect("apply"), vec![DeckChange::Shapes(vec![title])], "the next update lands at once");
+    assert!(!b.needs_resync());
+    assert_eq!(deck_from_doc(&base, &a), deck_from_doc(&base, &b));
 }
 
 #[test]

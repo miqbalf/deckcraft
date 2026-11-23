@@ -89,6 +89,23 @@ pub struct ShapeEntry {
     pub fields: BTreeMap<String, Value>,
 }
 
+/// A local write that did not complete. `update` holds what `f` had already written before it
+/// erred, which this replica keeps: it must be sent. There is deliberately no conversion to
+/// [`LiveError`], so `?` cannot drop the update.
+#[derive(Debug)]
+pub struct WriteError {
+    pub error: LiveError,
+    pub update: Option<Vec<u8>>,
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
+impl std::error::Error for WriteError {}
+
 /// A slide or shape to tombstone or bring back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tomb {
@@ -322,6 +339,10 @@ pub struct DeckDoc {
     seen: Arc<Mutex<Vec<Seen>>>,
     slides: BTreeMap<SlideId, SlideEntry>,
     shapes: BTreeMap<ShapeId, ShapeEntry>,
+    /// Per entry, the keys that hold junk. The index is a function of the state alone: a
+    /// replica built from the state reads exactly as a live one.
+    slide_junk: BTreeMap<SlideId, BTreeSet<&'static str>>,
+    shape_junk: BTreeMap<ShapeId, BTreeSet<&'static str>>,
 }
 
 impl DeckDoc {
@@ -345,7 +366,8 @@ impl DeckDoc {
             undo.expand_scope(doc, &scope.slides);
             undo.expand_scope(doc, &scope.shapes);
         });
-        let mut d = DeckDoc { y, roots, seen, slides: BTreeMap::new(), shapes: BTreeMap::new() };
+        let mut d =
+            DeckDoc { y, roots, seen, slides: BTreeMap::new(), shapes: BTreeMap::new(), slide_junk: BTreeMap::new(), shape_junk: BTreeMap::new() };
         d.index_all();
         d
     }
@@ -366,48 +388,78 @@ impl DeckDoc {
 
     fn reindex_slide(&mut self, id: SlideId) {
         let txn = self.y.doc().transact();
-        let Some(m) = Roots::entry(&self.roots.slides, &txn, id.0) else {
-            if self.roots.slides.get(&txn, &id_key(id.0)).is_some() {
-                log::warn!("deckcraft-live: a slide entry is not a map; the earlier one is kept");
+        let mut bad = BTreeSet::new();
+        let e = match Roots::entry(&self.roots.slides, &txn, id.0) {
+            Some(m) => SlideEntry {
+                pos: read_order(&m, &txn, POS).or(POS, String::new(), String::new(), &mut bad),
+                del: read_bool(&m, &txn, DEL).or(DEL, false, false, &mut bad),
+                del_by: read_by(&m, &txn).or(DEL_BY, None, None, &mut bad),
+                layout: LayoutId(read_id(&m, &txn, LAYOUT).or(LAYOUT, 0, 0, &mut bad)),
+                fields: read_fields(&m, &txn, &SLIDE_FIELDS, &mut bad, |k, v| apply_slide_field(&mut Slide::default(), k, v)),
+            },
+            None if self.roots.slides.get(&txn, &id_key(id.0)).is_some() => {
+                log::warn!("deckcraft-live: a slide entry is not a map; the base's slide is used");
+                bad.extend([POS, DEL, LAYOUT]);
+                SlideEntry { pos: String::new(), del: false, del_by: None, layout: LayoutId(0), fields: BTreeMap::new() }
             }
-            return;
-        };
-        let prev = self.slides.get(&id);
-        let e = SlideEntry {
-            pos: read_order(&m, &txn, POS, prev.map(|p| p.pos.as_str())),
-            del: read_bool(&m, &txn, DEL, prev.map(|p| p.del)),
-            del_by: read_by(&m, &txn, prev.and_then(|p| p.del_by.as_deref())),
-            layout: LayoutId(read_id(&m, &txn, LAYOUT, prev.map(|p| p.layout.0))),
-            fields: read_fields(&m, &txn, &SLIDE_FIELDS, prev.map(|p| &p.fields), |k, v| apply_slide_field(&mut Slide::default(), k, v)),
+            None => return,
         };
         drop(txn);
         self.slides.insert(id, e);
+        self.slide_junk.insert(id, bad);
     }
 
     fn reindex_shape(&mut self, id: ShapeId) {
         let txn = self.y.doc().transact();
-        let Some(m) = Roots::entry(&self.roots.shapes, &txn, id.0) else {
-            if self.roots.shapes.get(&txn, &id_key(id.0)).is_some() {
-                log::warn!("deckcraft-live: a shape entry is not a map; the earlier one is kept");
+        let mut bad = BTreeSet::new();
+        let e = match Roots::entry(&self.roots.shapes, &txn, id.0) {
+            Some(m) => {
+                let parent = read_id(&m, &txn, PARENT).or(PARENT, 0, 0, &mut bad);
+                let fields = read_fields(&m, &txn, &SHAPE_FIELDS, &mut bad, |k, v| {
+                    let mut s = Shape { text: Some(TextBody::default()), ..Default::default() };
+                    apply_shape_field(&mut s, k, v)
+                });
+                ShapeEntry {
+                    slide: SlideId(read_id(&m, &txn, SLIDE).or(SLIDE, 0, 0, &mut bad)),
+                    parent: (parent != 0).then_some(ShapeId(parent)),
+                    z: read_order(&m, &txn, Z).or(Z, String::new(), String::new(), &mut bad),
+                    del: read_bool(&m, &txn, DEL).or(DEL, false, false, &mut bad),
+                    del_by: read_by(&m, &txn).or(DEL_BY, None, None, &mut bad),
+                    // A text body is there when `body` is (Ruling D26 as amended in L3 fix round 1).
+                    has_text: fields.contains_key(BODY),
+                    fields,
+                }
             }
-            return;
-        };
-        let prev = self.shapes.get(&id);
-        let parent = read_id(&m, &txn, PARENT, prev.map(|p| p.parent.map_or(0, |s| s.0)));
-        let e = ShapeEntry {
-            slide: SlideId(read_id(&m, &txn, SLIDE, prev.map(|p| p.slide.0))),
-            parent: (parent != 0).then_some(ShapeId(parent)),
-            z: read_order(&m, &txn, crate::schema::Z, prev.map(|p| p.z.as_str())),
-            del: read_bool(&m, &txn, DEL, prev.map(|p| p.del)),
-            del_by: read_by(&m, &txn, prev.and_then(|p| p.del_by.as_deref())),
-            has_text: matches!(m.get(&txn, TEXT), Some(Out::YText(_))),
-            fields: read_fields(&m, &txn, &SHAPE_FIELDS, prev.map(|p| &p.fields), |k, v| {
-                let mut s = Shape { text: Some(TextBody::default()), ..Default::default() };
-                apply_shape_field(&mut s, k, v)
-            }),
+            None if self.roots.shapes.get(&txn, &id_key(id.0)).is_some() => {
+                log::warn!("deckcraft-live: a shape entry is not a map; the base's shape is used");
+                bad.extend([SLIDE, PARENT, Z, DEL, BODY]);
+                ShapeEntry { slide: SlideId(0), parent: None, z: String::new(), del: false, del_by: None, has_text: false, fields: BTreeMap::new() }
+            }
+            None => return,
         };
         drop(txn);
         self.shapes.insert(id, e);
+        self.shape_junk.insert(id, bad);
+    }
+
+    /// The keys of a slide entry that hold junk (the rebuild uses the base's value for them).
+    pub(crate) fn slide_junk(&self, id: SlideId) -> Option<&BTreeSet<&'static str>> {
+        self.slide_junk.get(&id).filter(|b| !b.is_empty())
+    }
+
+    /// The keys of a shape entry that hold junk.
+    pub(crate) fn shape_junk(&self, id: ShapeId) -> Option<&BTreeSet<&'static str>> {
+        self.shape_junk.get(&id).filter(|b| !b.is_empty())
+    }
+
+    /// Every slide entry, as indexed.
+    pub(crate) fn slide_entries(&self) -> &BTreeMap<SlideId, SlideEntry> {
+        &self.slides
+    }
+
+    /// Every shape entry, as indexed.
+    pub(crate) fn shape_entries(&self) -> &BTreeMap<ShapeId, ShapeEntry> {
+        &self.shapes
     }
 
     /// Drain what the observers saw and bring the index up to date with it.
@@ -455,33 +507,9 @@ impl DeckDoc {
         self.shapes.get(&id).cloned()
     }
 
-    /// Every shape entry on `slide`, tombstones included, as (id, effective parent): the parent
-    /// is kept only when it is a group on the same slide and the chain up from it ends at the
-    /// slide; otherwise the shape reads at slide level.
+    /// Every shape entry on `slide`, tombstones included, as (id, effective parent).
     pub(crate) fn tree_of(&self, slide: SlideId) -> Vec<(ShapeId, Option<ShapeId>)> {
-        let on: BTreeMap<ShapeId, &ShapeEntry> = self.shapes.iter().filter(|(_, e)| e.slide == slide).map(|(id, e)| (*id, e)).collect();
-        let parent_of =
-            |id: ShapeId| -> Option<ShapeId> { on.get(&id).and_then(|e| e.parent).filter(|p| on.get(p).is_some_and(|pe| is_group_kind(&pe.fields))) };
-        let mut out = Vec::new();
-        for id in on.keys() {
-            let mut p = parent_of(*id);
-            let mut seen = HashSet::from([*id]);
-            let mut ok = true;
-            let mut cur = p;
-            while let Some(c) = cur {
-                if !seen.insert(c) || seen.len() > MAX_DEPTH {
-                    ok = false;
-                    break;
-                }
-                cur = parent_of(c);
-            }
-            if !ok {
-                log::warn!("deckcraft-live: a shape's parent chain loops or is too deep; it reads at slide level");
-                p = None;
-            }
-            out.push((*id, p));
-        }
-        out
+        tree_in(&self.shapes, slide)
     }
 
     /// The live shapes of `slide` in tree order: siblings by (z, id), each group followed by its
@@ -515,12 +543,6 @@ impl DeckDoc {
         let txn = self.y.doc().transact();
         let t = self.roots.text(&txn, &target)?;
         Some(read_body(&txn, &t))
-    }
-
-    /// Whether the shape's entry holds a `text` key that is not a YText (a peer's junk).
-    pub(crate) fn text_is_junk(&self, id: ShapeId) -> bool {
-        let txn = self.y.doc().transact();
-        Roots::entry(&self.roots.shapes, &txn, id.0).and_then(|m| m.get(&txn, TEXT)).is_some_and(|o| !matches!(o, Out::YText(_)))
     }
 
     /// A position (chars of the flat form, as [`TextOp`] counts) as a yrs sticky index, `encode_v1`.
@@ -569,26 +591,35 @@ impl DeckDoc {
     /// Run `f` as one local transaction and return its update. `tracked`: in the yrs undo history
     /// (text, Ruling D4); otherwise untracked.
     ///
-    /// Refused with [`LiveError::Damaged`] on a damaged replica and [`LiveError::NoClient`] before
-    /// a space was granted. A yrs transaction commits what it holds, so `f` checks before it
-    /// writes; an `Err` from `f` after a write still leaves the write in this replica.
-    pub fn write(&mut self, tracked: bool, f: impl FnOnce(&mut DeckTxn) -> Result<(), LiveError>) -> Result<Vec<u8>, LiveError> {
+    /// A yrs transaction commits what it holds, so an `Err` from `f` after it wrote still leaves
+    /// the write in this replica. The update for it is then handed out in [`WriteError::update`]:
+    /// the caller must send it like any other, or every later update from this client would wait
+    /// at every peer for the missing clocks (L3 fix round 1). Refused before any write, with no
+    /// update: [`LiveError::Damaged`] on a damaged replica, [`LiveError::NoClient`] before a space
+    /// was granted.
+    pub fn write(&mut self, tracked: bool, f: impl FnOnce(&mut DeckTxn) -> Result<(), LiveError>) -> Result<Vec<u8>, WriteError> {
         if self.y.damaged() {
-            return Err(LiveError::Damaged);
+            return Err(WriteError { error: LiveError::Damaged, update: None });
         }
         if self.y.client().is_none() {
-            return Err(LiveError::NoClient);
+            return Err(WriteError { error: LiveError::NoClient, update: None });
         }
         let (result, update) = {
             let mut t = DeckTxn { txn: self.y.doc().transact_mut_with(if tracked { LOCAL } else { UNTRACKED }), roots: &self.roots, skipped: 0 };
             let r = f(&mut t);
             if t.skipped > 0 {
-                log::warn!("deckcraft-live: {} writes named an entry the document does not hold; skipped", t.skipped);
+                log::warn!("deckcraft-live: {} writes named an entry or a text the document does not hold; skipped", t.skipped);
             }
             (r, t.txn.encode_update_v1())
         };
         self.settle();
-        result.map(|()| update)
+        match result {
+            Ok(()) => Ok(update),
+            Err(error) => {
+                let wrote = update.as_slice() != craft_collab::yrs::Update::EMPTY_V1;
+                Err(WriteError { error, update: wrote.then_some(update) })
+            }
+        }
     }
 
     /// Undo this replica's last tracked (text) transaction; the update to send.
@@ -667,7 +698,7 @@ impl Replica for DeckDoc {
     }
 
     /// Space 0 and the space already held are no-ops; any other space rebuilds the document
-    /// minting under it, the state and the index carried across.
+    /// minting under it, the state carried across (the index is a function of it).
     fn set_client(&mut self, space: u32) -> Result<(), LiveError> {
         if space == 0 {
             log::warn!("deckcraft-live: client id 0 belongs to the seed and is never adopted");
@@ -679,9 +710,6 @@ impl Replica for DeckDoc {
         let doc = self.y.rebuilt(space)?;
         let old = std::mem::replace(self, DeckDoc::assemble(doc, Some(space)));
         self.y.carry_marks(&old.y);
-        // The index keeps the earlier good values of keys a peer has since written junk to.
-        self.slides = old.slides;
-        self.shapes = old.shapes;
         Ok(())
     }
 
@@ -762,17 +790,18 @@ impl DeckTxn<'_> {
         }
     }
 
-    /// A new shape: every key, and its text body as a YText when it has one. A group's children
-    /// are separate entries, put with `parent`.
+    /// A new shape: every key, and always a `text` YText, holding the text body when there is one
+    /// and empty otherwise; `body` says whether the shape has a text body (Ruling D26 as amended
+    /// in L3 fix round 1), so no peer ever creates the YText concurrently with another. A group's
+    /// children are not written: each needs its own `put_shape` with `parent`.
     pub fn put_shape(&mut self, slide: SlideId, parent: Option<ShapeId>, z: &str, shape: &Shape) {
+        let empty = TextBody::default();
         let mut keys: BTreeMap<&'static str, New> = shape_values(shape).into_iter().map(|(k, v)| (k, New::Any(to_any(&v)))).collect();
         keys.insert(SLIDE, New::Any(Any::from(i64::from(slide.0))));
         keys.insert(PARENT, New::Any(Any::from(i64::from(parent.map_or(0, |p| p.0)))));
         keys.insert(Z, New::Any(Any::from(z)));
         keys.insert(DEL, New::Any(Any::Bool(false)));
-        if let Some(t) = &shape.text {
-            keys.insert(TEXT, New::Text(t));
-        }
+        keys.insert(TEXT, New::Text(shape.text.as_ref().unwrap_or(&empty)));
         let roots = self.roots;
         self.put_entry(&roots.shapes, shape.id.0, keys);
     }
@@ -811,18 +840,13 @@ impl DeckTxn<'_> {
         }
     }
 
-    /// Apply text ops to a body. A shape or slide that has no YText yet gets an empty one first.
+    /// Apply text ops to a body. Every entry has its YText from the start (`put_shape`,
+    /// `put_slide`); one that does not (a peer's junk in the key) is skipped, never created here.
     pub fn text_ops(&mut self, target: TextTarget, ops: &[TextOp]) {
-        let (tomb, key) = match &target {
-            TextTarget::Shape(id) => (Tomb::Shape(*id), TEXT),
-            TextTarget::Notes(id) => (Tomb::Slide(*id), NOTES),
-        };
-        let Some(m) = self.entry(tomb) else { return };
-        let text = match m.get(&self.txn, key) {
-            Some(Out::YText(t)) => t,
-            _ => m.insert(&mut self.txn, key, TextPrelim::new("")),
-        };
-        apply_ops(&mut self.txn, &text, ops);
+        match self.roots.text(&self.txn, &target) {
+            Some(text) => apply_ops(&mut self.txn, &text, ops),
+            None => self.skipped += 1,
+        }
     }
 
     /// The value at a latest-wins key now, as JSON; None when absent or a nested type.
@@ -877,66 +901,72 @@ fn seen_in(txn: &TransactionMut, e: &Event, slides: bool) -> Vec<Seen> {
     }
 }
 
-/// An order key, or the earlier one when the value is not a key (logged).
-fn read_order<T: ReadTxn>(m: &MapRef, txn: &T, key: &str, prev: Option<&str>) -> String {
-    match m.get(txn, key) {
-        Some(Out::Any(Any::String(s))) if order::is_key(&s) => s.to_string(),
-        other => {
-            if other.is_some() {
-                log::warn!("deckcraft-live: a {key} value is not an order key; the earlier one is kept");
+/// One key as read: absent, read well, or present but unreadable (a peer's junk, logged).
+#[derive(Clone, Debug, PartialEq)]
+enum Read<T> {
+    Absent,
+    Good(T),
+    Junk,
+}
+
+impl<T> Read<T> {
+    /// The value, `absent` when the key is absent and `junk` (noting `key` in `bad`) when unreadable.
+    fn or(self, key: &'static str, absent: T, junk: T, bad: &mut BTreeSet<&'static str>) -> T {
+        match self {
+            Read::Good(v) => v,
+            Read::Absent => absent,
+            Read::Junk => {
+                log::warn!("deckcraft-live: a {key} value does not read; the base's is used");
+                bad.insert(key);
+                junk
             }
-            prev.unwrap_or_default().to_owned()
         }
     }
 }
 
-fn read_bool<T: ReadTxn>(m: &MapRef, txn: &T, key: &str, prev: Option<bool>) -> bool {
+fn read_order<T: ReadTxn>(m: &MapRef, txn: &T, key: &str) -> Read<String> {
     match m.get(txn, key) {
-        Some(Out::Any(Any::Bool(b))) => b,
-        None => false,
-        Some(_) => {
-            log::warn!("deckcraft-live: a {key} value is not a bool; the earlier one is kept");
-            prev.unwrap_or(false)
-        }
+        None => Read::Absent,
+        Some(Out::Any(Any::String(s))) if order::is_key(&s) => Read::Good(s.to_string()),
+        Some(_) => Read::Junk,
     }
 }
 
-fn read_by<T: ReadTxn>(m: &MapRef, txn: &T, prev: Option<&str>) -> Option<String> {
+fn read_bool<T: ReadTxn>(m: &MapRef, txn: &T, key: &str) -> Read<bool> {
+    match m.get(txn, key) {
+        None => Read::Absent,
+        Some(Out::Any(Any::Bool(b))) => Read::Good(b),
+        Some(_) => Read::Junk,
+    }
+}
+
+fn read_by<T: ReadTxn>(m: &MapRef, txn: &T) -> Read<Option<String>> {
     match m.get(txn, DEL_BY) {
-        Some(Out::Any(Any::String(s))) => Some(s.to_string()),
-        None => None,
-        Some(_) => {
-            log::warn!("deckcraft-live: a delBy value is not text; the earlier one is kept");
-            prev.map(str::to_owned)
-        }
+        None => Read::Absent,
+        Some(Out::Any(Any::String(s))) => Read::Good(Some(s.to_string())),
+        Some(_) => Read::Junk,
     }
 }
 
-/// An id stored as a number (0 when absent).
-fn read_id<T: ReadTxn>(m: &MapRef, txn: &T, key: &str, prev: Option<u32>) -> u32 {
+/// An id stored as a number.
+fn read_id<T: ReadTxn>(m: &MapRef, txn: &T, key: &str) -> Read<u32> {
     let v = match m.get(txn, key) {
-        None => return prev.unwrap_or(0),
+        None => return Read::Absent,
         Some(Out::Any(Any::Number(n))) => {
             n.as_i64().or_else(|| n.as_f64().filter(|f| f.fract() == 0.0 && f.is_finite() && f.abs() < 9.0e15).map(|f| f as i64))
         }
         Some(_) => None,
     };
-    match v.and_then(|i| u32::try_from(i).ok()) {
-        Some(id) => id,
-        None => {
-            log::warn!("deckcraft-live: a {key} value is not an id; the earlier one is kept");
-            prev.unwrap_or(0)
-        }
-    }
+    v.and_then(|i| u32::try_from(i).ok()).map_or(Read::Junk, Read::Good)
 }
 
-/// The set latest-wins keys that read as their type. A key holding junk keeps its earlier value
-/// (logged); an absent key is absent.
+/// The set latest-wins keys that read as their type. A key holding junk is left out and noted in
+/// `bad` (logged), so the rebuild uses the base's value.
 fn read_fields<T: ReadTxn>(
     m: &MapRef,
     txn: &T,
-    keys: &[&str],
-    prev: Option<&BTreeMap<String, Value>>,
+    keys: &[&'static str],
+    bad: &mut BTreeSet<&'static str>,
     valid: impl Fn(&str, &Value) -> bool,
 ) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
@@ -951,12 +981,35 @@ fn read_fields<T: ReadTxn>(
                 out.insert((*k).to_owned(), v);
             }
             None => {
-                log::warn!("deckcraft-live: a {k} value does not read; the earlier one is kept");
-                if let Some(p) = prev.and_then(|p| p.get(*k)) {
-                    out.insert((*k).to_owned(), p.clone());
-                }
+                log::warn!("deckcraft-live: a {k} value does not read; the base's is used");
+                bad.insert(k);
             }
         }
+    }
+    out
+}
+
+/// Every entry of `shapes` on `slide`, tombstones included, as (id, effective parent): the parent
+/// is kept only when it is a group on the same slide and the chain up from it ends at the slide;
+/// otherwise the shape reads at slide level.
+pub(crate) fn tree_in(shapes: &BTreeMap<ShapeId, ShapeEntry>, slide: SlideId) -> Vec<(ShapeId, Option<ShapeId>)> {
+    let on: BTreeMap<ShapeId, &ShapeEntry> = shapes.iter().filter(|(_, e)| e.slide == slide).map(|(id, e)| (*id, e)).collect();
+    let parent_of =
+        |id: ShapeId| -> Option<ShapeId> { on.get(&id).and_then(|e| e.parent).filter(|p| on.get(p).is_some_and(|pe| is_group_kind(&pe.fields))) };
+    let mut out = Vec::new();
+    for id in on.keys() {
+        let mut p = parent_of(*id);
+        let mut seen = HashSet::from([*id]);
+        let mut cur = p;
+        while let Some(c) = cur {
+            if !seen.insert(c) || seen.len() > MAX_DEPTH {
+                log::warn!("deckcraft-live: a shape's parent chain loops or is too deep; it reads at slide level");
+                p = None;
+                break;
+            }
+            cur = parent_of(c);
+        }
+        out.push((*id, p));
     }
     out
 }

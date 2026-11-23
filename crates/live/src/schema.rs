@@ -14,9 +14,12 @@
 //! ```
 //!
 //! JSON values are the model's serde form. Entries are never removed: a deleted slide or shape is
-//! a tombstone (`del: true`, `delBy` the deleter's uid). `text` is absent when the shape has no text
-//! body (Ruling D26); `keep` (tags, `raw_ext`, SmartArt `diagram`) is written at the seed and for
-//! new shapes and never edited live (Ruling D25).
+//! a tombstone (`del: true`, `delBy` the deleter's uid). Every shape entry has its `text` YText
+//! from the seed or `put_shape` on, empty when the shape has no text body; whether it has one is
+//! read from `body` (Ruling D26 as amended in L3 fix round 1), so no two peers ever create the
+//! YText concurrently. `keep` (tags, `raw_ext`, SmartArt `diagram`) is written at the seed and for
+//! new shapes and never edited live (Ruling D25). A key holding a value that does not read is
+//! ignored (logged) and the rebuild uses the base's value.
 
 pub const META: &str = "meta";
 pub const SLIDES: &str = "slides";
