@@ -17,13 +17,19 @@
 //! composition that ends, inside a scope reports up to that point first (`Session::live_cut`),
 //! so those reports match the undo steps the engine keeps. A failed command puts the
 //! presentation back and so reports nothing.
+//!
+//! The other way (H2, H3): the live layer lands other people's changes with
+//! [`Session::apply_remote`] or, for a reset, [`Session::replace_presentation_quiet`]. Neither adds
+//! an undo step, a journal entry or a report. While a live undo hook is set
+//! ([`Session::set_live_undo_hook`]), Undo and Redo of that presentation go to the live layer.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use deckcraft_model::Presentation;
+use deckcraft_model::{Presentation, ShapeId, Slide, SlideId};
 
-use crate::{DocState, Session};
+use crate::{DocState, EngineError, Result, Session, TextSel};
 
 /// One local change to an observed presentation.
 #[derive(Clone, Debug)]
@@ -40,10 +46,15 @@ pub struct Edited {
 /// Receives the [`Edited`] reports of one presentation.
 pub type EditObserver = Box<dyn FnMut(Edited) + Send>;
 
+/// Takes Undo (`false`) and Redo (`true`) of one presentation; answers whether a step was taken.
+pub type LiveUndoHook = Box<dyn FnMut(bool) -> bool + Send>;
+
 /// The observers and the state of the scope in progress.
 #[derive(Default)]
 pub(crate) struct Live {
     observers: HashMap<u64, EditObserver>,
+    /// Live undo hooks, by document uid (H3).
+    undo_hooks: HashMap<u64, LiveUndoHook>,
     /// Nesting of scopes; only the outermost one reports.
     depth: u32,
     /// What each observer has seen, by document uid, while a scope is open.
@@ -82,6 +93,7 @@ impl Session {
     /// Drop the observer of a closed document.
     pub(crate) fn live_closed(&mut self, uid: u64) {
         self.live.observers.remove(&uid);
+        self.live.undo_hooks.remove(&uid);
         self.live.seen.retain(|(u, _)| *u != uid);
     }
 
@@ -168,5 +180,182 @@ impl Session {
         if let Some(o) = self.live.observers.get_mut(&e.doc) {
             o(e);
         }
+    }
+
+    /// Land a change made by someone else in document `doc`: `f` changes a copy of its
+    /// presentation through [`RemoteCtx`], and the copy replaces the document if `f` succeeds.
+    ///
+    /// No undo step, no journal, no observer call. Selected shapes that are gone are dropped; the
+    /// current slide is found again by its [`SlideId`] (Ruling D17). When it was removed, the slide
+    /// now at its old index (or the last one) becomes current, with nothing selected on it; the
+    /// caller reads that from [`Session::doc`] and tells the person. Err leaves the document
+    /// exactly as before (the same allocation). Err([`EngineError::RemoteBusy`]) while a pointer
+    /// interaction or a composition is open in it ([`Session::remote_busy`]); the live layer holds
+    /// the change until then.
+    pub fn apply_remote<R>(&mut self, doc: u64, f: impl FnOnce(&mut RemoteCtx) -> Result<R>) -> Result<R> {
+        let Some(base) = self.docs.iter().find(|d| d.uid == doc).map(|d| d.doc.clone()) else { return Err(EngineError::NoDocument) };
+        if self.remote_busy(doc) {
+            return Err(EngineError::RemoteBusy);
+        }
+        let mut ctx = RemoteCtx { doc: Cow::Borrowed(&base), text: None };
+        let r = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut ctx))) {
+            Ok(r) => r?,
+            Err(payload) => {
+                self.panics_caught += 1;
+                return Err(EngineError::Internal("apply_remote".into(), crate::guard::panic_message(payload.as_ref())));
+            }
+        };
+        let RemoteCtx { doc: next, text } = ctx;
+        let next = match next {
+            Cow::Owned(p) => Some(p),
+            Cow::Borrowed(_) => None,
+        };
+        self.land_remote(doc, &base, next, text);
+        Ok(r)
+    }
+
+    /// Is a pointer interaction or a composition open in document `doc`? Remote changes wait
+    /// until it ends: a drag or a composition holds the presentation from before it began.
+    pub fn remote_busy(&self, doc: u64) -> bool {
+        let Some(st) = self.docs.iter().find(|d| d.uid == doc) else { return false };
+        let active = self.active().is_some_and(|a| a.uid == doc);
+        st.interaction.is_some() || st.composition.is_some() || (active && self.tool.dragging())
+    }
+
+    /// A reset: the presentation replaced with no undo step; selection kept as
+    /// [`Session::apply_remote`] keeps it, and [`EngineError::RemoteBusy`] in the same cases.
+    pub fn replace_presentation_quiet(&mut self, doc: u64, p: Presentation) -> Result<()> {
+        self.apply_remote(doc, move |ctx| {
+            ctx.doc = Cow::Owned(Arc::new(p));
+            Ok(())
+        })
+    }
+
+    /// Bound to one document (by uid); dropped when it closes. While it is set, Undo and Redo of
+    /// that document go to it (the argument is `redo`) and it answers whether a step was taken.
+    /// The snapshot history is not touched while it is set, and neither is reported as a local
+    /// edit. `None` removes it; a hook for a uid that no open document has is dropped at once.
+    pub fn set_live_undo_hook(&mut self, doc: u64, hook: Option<LiveUndoHook>) {
+        match hook {
+            Some(h) if self.docs.iter().any(|d| d.uid == doc) => {
+                self.live.undo_hooks.insert(doc, h);
+            }
+            _ => {
+                self.live.undo_hooks.remove(&doc);
+            }
+        }
+    }
+
+    /// Does document `uid` have a live undo hook?
+    pub(crate) fn has_live_undo(&self, uid: u64) -> bool {
+        self.live.undo_hooks.contains_key(&uid)
+    }
+
+    /// Undo (or redo) document `uid` through its live undo hook: `None` without one, else
+    /// whether a step was taken. What it changes is not reported as a local edit.
+    pub(crate) fn live_undo(&mut self, uid: u64, redo: bool) -> Option<bool> {
+        let hook = self.live.undo_hooks.get_mut(&uid)?;
+        let taken = hook(redo);
+        self.live_absorb(uid);
+        Some(taken)
+    }
+
+    /// Put a remote change in place: the new presentation (if `f` changed it) and the selection
+    /// found again by id.
+    fn land_remote(&mut self, uid: u64, base: &Presentation, next: Option<Arc<Presentation>>, text: Option<Option<TextSel>>) {
+        let Some(st) = self.docs.iter_mut().find(|d| d.uid == uid) else { return };
+        let old_slide = st.selection.slide;
+        let current: Option<SlideId> = base.slides.get(old_slide).map(|s| s.id);
+        if let Some(n) = next {
+            st.doc = n;
+        }
+        let sel = &mut st.selection;
+        let removed = match current.map(|id| st.doc.slides.iter().position(|s| s.id == id)) {
+            Some(Some(i)) => {
+                sel.slide = i;
+                false
+            }
+            // Gone: the slide now at its index (clamped below) with nothing selected on it.
+            Some(None) => true,
+            None => false,
+        };
+        if removed {
+            sel.shapes.clear();
+            sel.text = None;
+            sel.cells = None;
+        } else if let Some(t) = text {
+            sel.text = t;
+        } else if let Some(t) = sel.text.as_mut() {
+            clamp_caret(st.doc.slides.get(sel.slide).map(|s| s.as_ref()), t);
+        }
+        if sel.range_anchor.is_some_and(|(a, b)| st.doc.slide(a).is_none() || st.doc.slide(b).is_none()) {
+            sel.range_anchor = None;
+        }
+        if sel.slide != old_slide || removed {
+            st.last_duplicate = None;
+        }
+        crate::clamp_selection(st);
+        let cells_gone = st.selection.cells.is_some_and(|(id, _, _)| st.shape(id).is_none());
+        if cells_gone {
+            st.selection.cells = None;
+        }
+        st.revision += 1;
+        self.live_absorb(uid);
+    }
+}
+
+/// A copy of one presentation that a remote change edits ([`Session::apply_remote`]). Nothing is
+/// copied until the first change, and each change copies only what it touches.
+pub struct RemoteCtx<'a> {
+    doc: Cow<'a, Arc<Presentation>>,
+    text: Option<Option<TextSel>>,
+}
+
+impl RemoteCtx<'_> {
+    pub fn presentation(&self) -> &Presentation {
+        &self.doc
+    }
+
+    /// The whole slide list in its new order. Slides that are `Arc::ptr_eq` to the current ones
+    /// are untouched.
+    pub fn set_slides(&mut self, slides: Vec<Arc<Slide>>) {
+        Arc::make_mut(self.doc.to_mut()).slides = slides;
+    }
+
+    /// `edit.delete`'s routine on one slide (by id), for shapes deleted by someone else. Returns
+    /// every id that is gone ([`crate::cmd::edit::delete_shapes_in`]).
+    pub fn delete_shapes(&mut self, slide: SlideId, ids: &[ShapeId]) -> Result<Vec<ShapeId>> {
+        let Some(i) = self.doc.slides.iter().position(|s| s.id == slide) else {
+            return Err(EngineError::Other(format!("no slide with id {}", slide.0)));
+        };
+        Ok(crate::cmd::edit::delete_shapes_in(Arc::make_mut(self.doc.to_mut()), i, ids))
+    }
+
+    /// The local text caret after the change, computed by the live layer (None drops it).
+    pub fn set_text(&mut self, text: Option<TextSel>) {
+        self.text = Some(text);
+    }
+}
+
+/// Keep a caret the live layer did not place inside its text: a remote change may have
+/// shortened it.
+fn clamp_caret(slide: Option<&Slide>, t: &mut TextSel) {
+    if t.cell.is_some() {
+        return;
+    }
+    let body = if t.notes {
+        slide.map(|s| &s.notes)
+    } else {
+        slide.and_then(|s| deckcraft_model::find_shape(&s.shapes, t.shape)).and_then(|s| s.text.as_ref())
+    };
+    let Some(body) = body else { return };
+    let fit = |(p, c): (usize, usize)| {
+        let p = p.min(body.paragraphs.len().saturating_sub(1));
+        (p, c.min(body.paragraphs.get(p).map_or(0, |x| x.char_len())))
+    };
+    t.anchor = fit(t.anchor);
+    t.caret = fit(t.caret);
+    if t.line_end.is_some_and(|l| l != t.caret) {
+        t.line_end = None;
     }
 }

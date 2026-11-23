@@ -36,13 +36,14 @@ use deckcraft_model::{Presentation, Shape, ShapeId, Slide, SlideId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use cmd::edit::delete_shapes_in;
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
 pub use deckcraft_geom as geom;
 pub use deckcraft_media as media;
 pub use deckcraft_model as model;
 pub use deckcraft_pdf as pdf;
 pub use deckcraft_render as render;
-pub use live::{EditObserver, Edited};
+pub use live::{EditObserver, Edited, LiveUndoHook, RemoteCtx};
 pub use tools::{Mods, PointerEvent, PointerKind, ToolKind};
 
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +60,10 @@ pub enum EngineError {
     Other(String),
     #[error("internal error in `{0}` (the presentation was kept as it was): {1}")]
     Internal(String, String),
+    /// A remote change can't land while a pointer interaction or a composition is open; the live
+    /// layer holds it until that ends.
+    #[error("the presentation is busy with a drag or text being composed; the change waits")]
+    RemoteBusy,
 }
 
 impl From<deckcraft_model::ModelError> for EngineError {
