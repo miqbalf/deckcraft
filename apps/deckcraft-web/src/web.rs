@@ -55,8 +55,12 @@ pub fn start() {
                     }
                     let inbox: Inbox = Inbox::default();
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone());
+                    // Live editing: the parent's `live` messages and the session's tickets (`host`).
+                    let live_events = crate::host::LiveEvents::default();
+                    let live = crate::host::Live::default();
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, cc.egui_ctx.clone());
+                        bridge.listen_live(live_events.clone(), live.joining(), cc.egui_ctx.clone());
                     }
                     let mut app = SlideApp::new(Session::new(), services);
                     // In host mode the parent sends the presentation to edit; no sample meanwhile.
@@ -80,7 +84,7 @@ pub fn start() {
                         crate::host::Bridge::set_author(&mut app, &author);
                     }
                     crate::api::install(&mut app, cc.egui_ctx.clone());
-                    Ok(Box::new(WebShell { app, inbox, bridge: app_bridge }))
+                    Ok(Box::new(WebShell { app, inbox, bridge: app_bridge, live, live_events }))
                 }),
             )
             .await;
@@ -121,6 +125,9 @@ struct WebShell {
     inbox: Inbox,
     /// The parent page that keeps the files (`?host=parent`).
     bridge: Option<crate::host::Bridge>,
+    /// The live session the parent page asked for, if any.
+    live: crate::host::Live,
+    live_events: crate::host::LiveEvents,
 }
 
 impl eframe::App for WebShell {
@@ -130,9 +137,11 @@ impl eframe::App for WebShell {
         if let Some(bridge) = &self.bridge {
             bridge.install_fonts(&mut self.app);
             bridge.open_files(&mut self.app);
+            self.live.before(&mut self.app, &self.live_events, bridge);
         }
         self.app.logic(ctx);
         if let Some(bridge) = &self.bridge {
+            self.live.after(&mut self.app, bridge);
             bridge.report_dirty(&self.app);
         }
         if self.app.show.is_none()

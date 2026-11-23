@@ -16,6 +16,11 @@ path = "src/main.rs"
 [dependencies]
 deckcraft-engine = { workspace = true }
 deckcraft-ui-egui = { workspace = true }
+# Live editing (Ruling D2/D20): the session, its status and access, and the ticket's claims.
+deckcraft-live = { workspace = true }
+craft-live = { workspace = true }
+# Reads a live ticket's claims (`live_ticket`); already in Cargo.lock.
+base64 = { workspace = true }
 # The page command API (storytold/craft-libs#413): window.deckcraft over the control channel.
 craft-web-api = { git = "https://github.com/storytold/craft-libs", rev = "fd5e2feff6ea25bed371a99cc732b3968d621505", version = "0.1.0" }
 # The host messages (storytold/craft-libs): one contract and one bridge for the web builds.
@@ -26,10 +31,14 @@ log = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# The browser hub over the page's socket.io-client (`/craft/vendor/socket.io.min.js`), from
+# miqbalf/collab-craft at the workspace's one rev, departing from AGENTS.md rule 10 by owner decision.
+craft-collab = { workspace = true, features = ["web-hub"] }
+chrono = { workspace = true }
 # `wgpu` pulls egui-wgpu's defaults: WebGPU plus the WebGL2 fallback.
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }
 rfd = { workspace = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "Url", "Location", "CssStyleDeclaration", "MessageEvent", "Event", "EventTarget", "UrlSearchParams"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "Url", "Location", "CssStyleDeclaration", "MessageEvent", "Event", "EventTarget", "UrlSearchParams", "Request", "RequestInit", "RequestMode", "RequestCredentials", "Response", "Headers", "AbortController", "AbortSignal"] }

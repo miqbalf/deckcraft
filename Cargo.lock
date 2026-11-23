@@ -1151,12 +1151,14 @@ version = "0.1.0"
 source = "git+https://github.com/miqbalf/collab-craft?rev=17a46eb1c2803a6c67d2d81ca5ffd9289669ce42#17a46eb1c2803a6c67d2d81ca5ffd9289669ce42"
 dependencies = [
  "base64 0.23.1",
+ "js-sys",
  "log",
  "rust_socketio",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "wasm-bindgen",
  "yrs",
 ]
 
@@ -1831,9 +1833,14 @@ dependencies = [
 name = "deckcraft-web"
 version = "0.19.0"
 dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "craft-collab",
+ "craft-live",
  "craft-web-api",
  "craft-web-host",
  "deckcraft-engine",
+ "deckcraft-live",
  "deckcraft-ui-egui",
  "eframe",
  "egui",
