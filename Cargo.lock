@@ -1802,6 +1802,8 @@ dependencies = [
 name = "deckcraft-ui-egui"
 version = "0.19.0"
 dependencies = [
+ "craft-collab",
+ "craft-live",
  "craft-ui",
  "craft-update",
  "deckcraft-anim",
@@ -1809,6 +1811,7 @@ dependencies = [
  "deckcraft-engine",
  "deckcraft-fonts",
  "deckcraft-geom",
+ "deckcraft-live",
  "deckcraft-media",
  "deckcraft-model",
  "deckcraft-render",
