@@ -283,3 +283,57 @@ fn live_undo_hook_takes_undo_and_redo_for_its_document_only() {
     assert!(*doc(&s) == *empty, "the snapshot was restored");
     assert_eq!(calls.lock().expect("lock").len(), 2, "the hook heard nothing of it");
 }
+
+/// Someone else renames the first slide.
+fn rename_first_slide(s: &mut Session, u: u64) -> deckcraft_engine::Result<()> {
+    s.apply_remote(u, |ctx| {
+        let slides = reordered(ctx.presentation(), |v| {
+            let mut sl = (*v[0]).clone();
+            sl.name = format!("{} (theirs)", sl.name);
+            v[0] = Arc::new(sl);
+        });
+        ctx.set_slides(slides);
+        Ok(())
+    })
+}
+
+#[test]
+fn a_remote_change_never_lands_inside_a_drop_or_commit_report() {
+    // A drag: the remote change is held, the drop reports only the move.
+    let mut s = Session::with_new();
+    insert(&mut s, 100.0, 100.0);
+    s.execute("edit.deselect", &json!({})).expect("deselect");
+    let u = uid(&s);
+    let got: Arc<Mutex<Vec<deckcraft_engine::Edited>>> = Arc::default();
+    let sink = got.clone();
+    s.set_edit_observer(u, Some(Box::new(move |e| sink.lock().expect("lock").push(e))));
+    let pressed = doc(&s);
+    s.pointer(ev(PointerKind::Down, 140.0, 130.0)).expect("down");
+    s.pointer(ev(PointerKind::Drag, 200.0, 160.0)).expect("drag");
+    assert!(matches!(rename_first_slide(&mut s, u), Err(EngineError::RemoteBusy)));
+    s.pointer(ev(PointerKind::Up, 200.0, 160.0)).expect("up");
+    let dropped = doc(&s);
+    rename_first_slide(&mut s, u).expect("after the drop");
+    {
+        let got = got.lock().expect("lock");
+        assert_eq!(got.len(), 1, "only the drop is reported");
+        assert!(Arc::ptr_eq(&got[0].before, &pressed) && Arc::ptr_eq(&got[0].after, &dropped));
+        assert!(got[0].after.slides[0].name == pressed.slides[0].name, "the drop holds none of the remote change");
+    }
+    got.lock().expect("lock").clear();
+
+    // A composition: likewise, its commit reports only the composed text.
+    s.execute("insert.textBox", &json!({"rect": [300.0, 300.0, 200.0, 50.0]})).expect("text box");
+    got.lock().expect("lock").clear();
+    let before = doc(&s);
+    s.compose_text("ka", None).expect("compose");
+    assert!(s.remote_busy(u));
+    assert!(matches!(rename_first_slide(&mut s, u), Err(EngineError::RemoteBusy)));
+    s.commit_text("か").expect("commit");
+    let committed = doc(&s);
+    rename_first_slide(&mut s, u).expect("after the commit");
+    let got = got.lock().expect("lock");
+    assert_eq!(got.len(), 1, "only the commit is reported");
+    assert!(Arc::ptr_eq(&got[0].before, &before) && Arc::ptr_eq(&got[0].after, &committed));
+    assert!(got[0].after.slides[0].name == before.slides[0].name, "the commit holds none of the remote change");
+}

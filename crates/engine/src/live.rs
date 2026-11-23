@@ -162,10 +162,19 @@ impl Session {
         }
     }
 
-    /// Take the current state of document `uid` as seen, so the open command or gesture does not
-    /// report what changed in it so far. For a change that came from the live layer itself (a
-    /// remote apply, a live undo), which must not be sent back. Outside a command or gesture
+    /// Take the current state of document `uid` as seen, so the open command does not report what
+    /// changed in it so far. For a change that came from the live layer itself, made inside a
+    /// command (a live undo through the hook), which must not be sent back. Outside a command
     /// nothing is reported anyway, so this does nothing there.
+    ///
+    /// Call it right after that change and before any local change in the same command: what
+    /// changed in the document earlier in the command, and was not reported yet, is taken as seen
+    /// too and never reported.
+    ///
+    /// It cannot keep a change out of an open pointer interaction or composition: their report
+    /// runs from the document before they began (`Interaction::doc`, `Composition::before`), so
+    /// anything that lands in the document meanwhile is in it. That is why
+    /// [`Session::apply_remote`] refuses while one is open ([`Session::remote_busy`]).
     pub fn live_absorb(&mut self, uid: u64) {
         if self.live.depth == 0 {
             return;
