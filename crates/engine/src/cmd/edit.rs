@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use deckcraft_model::text::TextBody;
-use deckcraft_model::{MediaId, Shape, ShapeId, Slide, SlideId};
+use deckcraft_model::{MediaId, Presentation, Shape, ShapeId, Slide, SlideId};
 use serde_json::{Value, json};
 
 use super::{
@@ -47,6 +47,12 @@ pub fn specs() -> Vec<CommandSpec> {
 }
 
 fn restore(s: &mut Session, redo: bool) -> Result<Value> {
+    // A live presentation's undo belongs to the live layer (H3): each person undoes their own
+    // edits. The snapshots are left alone, and nothing is reported as a local edit.
+    let uid = s.doc()?.uid;
+    if let Some(taken) = s.live_undo(uid, redo) {
+        return Ok(json!({"live": true, "taken": taken}));
+    }
     let vertex_kind = s.tool.vertex_kind.clone();
     let st = s.doc_mut()?;
     let (from, to) = if redo { (&mut st.history.redo, &mut st.history.undo) } else { (&mut st.history.undo, &mut st.history.redo) };
@@ -710,30 +716,76 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
         return ok();
     }
     s.edit(|doc, sel| {
-        let shapes = crate::shapes_mut(doc, sel).ok_or_else(|| bad("edit.delete", "no slide"))?;
-        let mut before = Vec::new();
-        deckcraft_model::walk(shapes, &mut |s, _| before.push(s.id));
-        let n = remove_shapes(shapes, &ids);
-        // Everything that is gone: the given ids plus group descendants and emptied groups.
-        let mut left = Vec::new();
-        deckcraft_model::walk(shapes, &mut |s, _| left.push(s.id));
-        let mut gone = ids.clone();
-        gone.extend(before.into_iter().filter(|i| !left.contains(i)));
-        // Animations of deleted shapes go too.
-        if sel.target == crate::Target::Slides
-            && let Some(sl) = doc.slides.get_mut(sel.slide)
-        {
-            let sl = Arc::make_mut(sl);
-            sl.animations.retain(|a| !gone.contains(&a.shape));
-            // Effects triggered by a deleted shape fall back to the main sequence.
-            for a in sl.animations.iter_mut().filter(|a| a.trigger.is_some_and(|t| gone.contains(&t))) {
-                a.trigger = None;
+        let gone = if sel.target == crate::Target::Slides {
+            if doc.slides.get(sel.slide).is_none() {
+                return Err(bad("edit.delete", "no slide"));
             }
-        }
+            delete_shapes_in(doc, sel.slide, &ids)
+        } else {
+            let shapes = crate::shapes_mut(doc, sel).ok_or_else(|| bad("edit.delete", "no slide"))?;
+            remove_gone(shapes, &ids)
+        };
         sel.shapes.retain(|i| !ids.contains(i));
         sel.text = None;
-        Ok(json!({"deleted": n}))
+        Ok(json!({"deleted": gone.len()}))
     })
+}
+
+/// Delete shapes `ids` from slide `slide` as `edit.delete` does, for a local delete and for one
+/// made by someone else (live co-editing). Empty groups go too; animations of a gone shape go and
+/// effects it triggered fall back to the main sequence; connector ends glued to a gone shape come
+/// loose where they are; groups refit around what is left. Returns every id that is gone: the
+/// given ones that were there, their group descendants and emptied groups. Nothing changes for a
+/// slide index that has no slide.
+pub fn delete_shapes_in(doc: &mut Presentation, slide: usize, ids: &[ShapeId]) -> Vec<ShapeId> {
+    let old = doc.clone();
+    let Some(sl) = doc.slides.get_mut(slide) else { return Vec::new() };
+    let sl = Arc::make_mut(sl);
+    let gone = remove_gone(&mut sl.shapes, ids);
+    let hit = |id: &ShapeId| ids.contains(id) || gone.contains(id);
+    sl.animations.retain(|a| !hit(&a.shape));
+    // Effects triggered by a deleted shape fall back to the main sequence.
+    for a in sl.animations.iter_mut().filter(|a| a.trigger.is_some_and(|t| hit(&t))) {
+        a.trigger = None;
+    }
+    super::arrange::refit_groups(&old, doc);
+    // Ends glued to a gone shape come loose where they are: rerouting does that for the slide's
+    // own connectors, the walk after it for connectors inside groups.
+    let at = crate::Selection { slide, ..Default::default() };
+    crate::connect::reroute(doc, &at);
+    let glued_to_gone = |e: &Option<(ShapeId, u32)>| e.is_some_and(|(id, _)| gone.contains(&id));
+    let mut loose = false;
+    if let Some(sl) = doc.slides.get(slide) {
+        deckcraft_model::walk(&sl.shapes, &mut |sh, _| {
+            if let deckcraft_model::ShapeKind::Connector { start, end } = &sh.kind {
+                loose |= glued_to_gone(start) || glued_to_gone(end);
+            }
+        });
+    }
+    if loose && let Some(sl) = doc.slides.get_mut(slide) {
+        walk_mut(&mut Arc::make_mut(sl).shapes, &mut |sh| {
+            if let deckcraft_model::ShapeKind::Connector { start, end } = &mut sh.kind {
+                for e in [start, end] {
+                    if glued_to_gone(e) {
+                        *e = None;
+                    }
+                }
+            }
+        });
+    }
+    gone
+}
+
+/// Remove `ids` from a shape tree (see [`remove_shapes`]) and return every id that is gone.
+fn remove_gone(shapes: &mut Vec<Shape>, ids: &[ShapeId]) -> Vec<ShapeId> {
+    let mut before = Vec::new();
+    deckcraft_model::walk(shapes, &mut |s, _| before.push(s.id));
+    remove_shapes(shapes, ids);
+    let mut left = std::collections::HashSet::new();
+    deckcraft_model::walk(shapes, &mut |s, _| {
+        left.insert(s.id);
+    });
+    before.into_iter().filter(|i| !left.contains(i)).collect()
 }
 
 /// Remove shapes by id anywhere in the tree; empty groups go too.

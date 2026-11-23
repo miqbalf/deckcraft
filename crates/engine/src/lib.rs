@@ -20,6 +20,7 @@ pub mod inkshape;
 pub mod io;
 pub mod keys;
 pub mod links;
+pub mod live;
 pub mod media_refs;
 pub mod recovery;
 pub mod sample;
@@ -35,12 +36,14 @@ use deckcraft_model::{Presentation, Shape, ShapeId, Slide, SlideId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use cmd::edit::delete_shapes_in;
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
 pub use deckcraft_geom as geom;
 pub use deckcraft_media as media;
 pub use deckcraft_model as model;
 pub use deckcraft_pdf as pdf;
 pub use deckcraft_render as render;
+pub use live::{EditObserver, Edited, LiveUndoHook, RemoteCtx};
 pub use tools::{Mods, PointerEvent, PointerKind, ToolKind};
 
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +60,10 @@ pub enum EngineError {
     Other(String),
     #[error("internal error in `{0}` (the presentation was kept as it was): {1}")]
     Internal(String, String),
+    /// A remote change can't land while a pointer interaction or a composition is open; the live
+    /// layer holds it until that ends.
+    #[error("the presentation is busy with a drag or text being composed; the change waits")]
+    RemoteBusy,
 }
 
 impl From<deckcraft_model::ModelError> for EngineError {
@@ -517,6 +524,8 @@ pub struct Session {
     next_loaded: u64,
     /// Compositions the application settled itself (see [`Session::composition_settles`]).
     composition_settles: u64,
+    /// Edit observers and the scope in progress (H1).
+    live: live::Live,
 }
 
 impl Default for Session {
@@ -551,6 +560,7 @@ impl Session {
             loaded: vec![],
             next_loaded: 0,
             composition_settles: 0,
+            live: live::Live::default(),
         }
     }
     /// Hand over a presentation read on another thread ([`cmd::file::read_presentation_file`]);
@@ -585,16 +595,26 @@ impl Session {
     pub fn active(&self) -> Option<&DocState> {
         self.active.and_then(|i| self.docs.get(i))
     }
+    /// Content changes must go through [`Session::execute`] (or the pointer, key and text entry
+    /// points, or [`Session::apply_remote`]): changing the presentation through this bypasses the
+    /// edit observer, the undo history and the journal.
     pub fn active_mut(&mut self) -> Option<&mut DocState> {
         self.active.and_then(|i| self.docs.get_mut(i))
     }
     /// The open presentation with this [`DocState::uid`], active or not.
+    ///
+    /// Content changes must go through [`Session::execute`] (or the pointer, key and text entry
+    /// points, or [`Session::apply_remote`]): changing the presentation through this bypasses the
+    /// edit observer, the undo history and the journal.
     pub fn document_mut(&mut self, uid: u64) -> Option<&mut DocState> {
         self.docs.iter_mut().find(|d| d.uid == uid)
     }
     pub fn doc(&self) -> Result<&DocState> {
         self.active().ok_or(EngineError::NoDocument)
     }
+    /// Content changes must go through [`Session::execute`] (or the pointer, key and text entry
+    /// points, or [`Session::apply_remote`]): changing the presentation through this bypasses the
+    /// edit observer, the undo history and the journal.
     pub fn doc_mut(&mut self) -> Result<&mut DocState> {
         self.active_mut().ok_or(EngineError::NoDocument)
     }
@@ -616,6 +636,7 @@ impl Session {
         let was = self.active().map(|d| d.uid);
         if i < self.docs.len() {
             let d = self.docs.remove(i);
+            self.live_closed(d.uid);
             if let Some(dir) = &self.recovery_dir {
                 recovery::discard(dir, d.uid);
             }
@@ -638,7 +659,7 @@ impl Session {
     /// Run command `id`. A panic inside it becomes [`EngineError::Internal`] and leaves the
     /// presentation as it was.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
-        self.guarded(id, |s| s.execute_unguarded(id, params))
+        self.live_scope(|s| s.guarded(id, |s| s.execute_unguarded(id, params)), |_| id.to_string())
     }
 
     /// Resolve and run a command, settling composition first, checking eligibility, rolling back a
@@ -648,6 +669,11 @@ impl Session {
         // Any other edit (or a click, a key, undo) settles an input method's composition first.
         if self.depth == 0 && (spec.journal || spec.undoable) && !matches!(id, "text.compose" | "text.commit") {
             self.settle_composition();
+        }
+        // Likewise a twist whose `gesture: end` never came: only its own steps continue it.
+        let twist = id == "shape.rotate" && matches!(params.get("gesture").and_then(Value::as_str), Some("move" | "end"));
+        if self.depth == 0 && (spec.journal || spec.undoable) && !twist {
+            self.settle_command_interaction();
         }
         if let Err(e) = (spec.enabled)(self) {
             // A command told which shapes to act on doesn't depend on what is selected.
@@ -730,6 +756,9 @@ impl Session {
     }
 
     /// Mutate the active presentation (copy-on-write) and bump the revision.
+    ///
+    /// For commands: called outside one, the change is not reported to the edit observer, has
+    /// no undo step and is not journaled.
     pub fn edit<T>(&mut self, f: impl FnOnce(&mut Presentation, &mut Selection) -> Result<T>) -> Result<T> {
         let st = self.doc_mut()?;
         let mut doc = (*st.doc).clone();
@@ -752,9 +781,11 @@ impl Session {
         let vertex_kind = self.tool.vertex_kind.clone();
         let Some(st) = self.active_mut() else { return };
         let Some(c) = st.composition.take() else { return };
+        let (uid, before) = (st.uid, c.before.clone());
         if !Arc::ptr_eq(&c.before, &st.doc) {
             push_undo(st, HistoryEntry { label: "Type Text".into(), doc: c.before, selection: c.before_selection, vertex_kind });
         }
+        self.live_cut(uid, before, "text.compose");
     }
 
     /// Settle a composition because the application did something else (a click, a key, a

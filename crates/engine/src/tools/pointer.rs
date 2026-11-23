@@ -95,7 +95,22 @@ impl Session {
     }
 
     /// Feed a pointer event to the active tool. Returns what happened (for agents).
+    ///
+    /// A gesture that changes the presentation is reported to its edit observer once, named
+    /// `pointer:<label>` after its undo step; a drag only at the drop ([`crate::live`]).
     pub fn pointer(&mut self, ev: PointerEvent) -> Result<Value> {
+        let top = |s: &Session| s.active().and_then(|d| d.history.undo.last().map(|e| (Arc::as_ptr(&e.doc), e.label.clone())));
+        let (was, open) = (top(self), self.active().and_then(|d| d.interaction.as_ref().map(|i| i.label.clone())));
+        self.live_scope(
+            |s| s.pointer_event(ev),
+            move |s| {
+                let step = top(s).filter(|t| was.as_ref().is_none_or(|w| w.0 != t.0)).map(|t| t.1);
+                format!("pointer:{}", step.or(open).unwrap_or_else(|| "Edit".into()))
+            },
+        )
+    }
+
+    fn pointer_event(&mut self, ev: PointerEvent) -> Result<Value> {
         let tol = if ev.tol > 0.0 { ev.tol } else { 4.0 };
         let p = Point::new(ev.x, ev.y);
         self.tool.pressure = ev.pressure.filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0));
@@ -181,12 +196,13 @@ impl Session {
     }
 
     fn commit(&mut self) {
-        if let Some(st) = self.active_mut()
-            && let Some(i) = st.interaction.take()
-            && !Arc::ptr_eq(&i.doc, &st.doc)
-        {
+        let Some(st) = self.active_mut() else { return };
+        let Some(i) = st.interaction.take() else { return };
+        let (uid, before, command) = (st.uid, i.doc.clone(), format!("pointer:{}", i.label));
+        if !Arc::ptr_eq(&i.doc, &st.doc) {
             crate::push_undo(st, HistoryEntry { label: i.label, doc: i.doc, selection: i.selection, vertex_kind: i.vertex_kind });
         }
+        self.live_cut(uid, before, &command);
     }
 
     /// Cancels a point or handle drag in Edit Points when Esc is pressed: ends the drag, puts back the
@@ -210,6 +226,19 @@ impl Session {
             self.tool.vertex_kind = kind;
         }
         true
+    }
+
+    /// End the interaction a command opened (a trackpad twist, `shape.rotate` with
+    /// `gesture: move`) whose end did not come: no pointer drag holds it. It becomes its own undo
+    /// step and report, so the command about to run is neither folded into it nor kept from
+    /// its own report.
+    ///
+    /// Only the twist's own interaction ("Rotation") is settled: a pointer gesture runs commands
+    /// of its own (the drop of an Alt-drag duplicates) inside its interaction.
+    pub(crate) fn settle_command_interaction(&mut self) {
+        if !self.tool.dragging() {
+            self.commit_named(super::TWIST);
+        }
     }
 
     /// End the interaction only when it is the one `label` started. A twist must not commit a drag.

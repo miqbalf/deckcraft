@@ -139,10 +139,10 @@ pub fn has_text_or_shapes(s: &Session) -> std::result::Result<(), String> {
 }
 
 pub fn can_undo(s: &Session) -> std::result::Result<(), String> {
-    if s.active().is_some_and(|d| !d.history.undo.is_empty()) { Ok(()) } else { Err("nothing to undo".into()) }
+    if s.active().is_some_and(|d| !d.history.undo.is_empty() || s.has_live_undo(d.uid)) { Ok(()) } else { Err("nothing to undo".into()) }
 }
 pub fn can_redo(s: &Session) -> std::result::Result<(), String> {
-    if s.active().is_some_and(|d| !d.history.redo.is_empty()) { Ok(()) } else { Err("nothing to redo".into()) }
+    if s.active().is_some_and(|d| !d.history.redo.is_empty() || s.has_live_undo(d.uid)) { Ok(()) } else { Err("nothing to redo".into()) }
 }
 
 macro_rules! cmd {
