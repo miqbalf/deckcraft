@@ -11,7 +11,8 @@
 //!   alone and the person is told once ([`UNDO_SKIPPED_TEXT`]).
 //!
 //! A new slide or shape is undone by a tombstone (`del` true), never by removing its entry; a
-//! delete is undone through the Restore writes (L5). The undo itself is one new group, sent in
+//! delete is undone through the Restore writes (L5), unless a group above or the slide was deleted
+//! by someone else since: then the step is skipped and told. The undo itself is one new group, sent in
 //! parts under the update budget, and its inverse goes on the other stack, so Redo mirrors Undo.
 
 use std::collections::BTreeSet;
@@ -21,10 +22,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use deckcraft_model::SlideId;
 use serde_json::Value;
 
-use crate::doc::{DeckDoc, DeckTxn, KeyRef, Tomb, WriteError};
+use crate::doc::{DeckDoc, DeckTxn, KeyRef, TextTarget, Tomb, WriteError};
 use crate::schema::{DEL, UPDATE_BUDGET};
 use crate::split::PlannedWrite;
-use crate::tomb::{restore_writes, slide_of};
+use crate::tomb::{restore_writes, slide_of, tombstoned};
 
 /// Why part of an undo or redo was not done: someone else changed those properties since.
 pub const UNDO_SKIPPED_TEXT: &str = "Someone else changed this since; not undone";
@@ -50,13 +51,15 @@ pub struct KeyWrite {
 pub struct Group {
     pub text_items: u32,
     pub writes: Vec<KeyWrite>,
-    /// The slides it touched, rebuilt in the engine once its undo or redo is written (its text
-    /// undo names no slide of its own).
+    /// The slides it touched, rebuilt in the engine once its undo or redo is written.
     pub(crate) slides: BTreeSet<SlideId>,
+    /// The texts its tracked transactions wrote: a text undo that changes another one reached
+    /// an older step of mine (L6 review I2).
+    pub(crate) texts: Vec<TextTarget>,
 }
 
 impl Group {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.text_items == 0 && self.writes.is_empty()
     }
 
@@ -71,6 +74,11 @@ impl Group {
     /// Make `w` in `t`, noting the key it writes ([`key_of`]) before and after.
     pub(crate) fn write_noted(&mut self, t: &mut DeckTxn, w: &PlannedWrite) {
         let Some((key, new)) = key_of(w) else {
+            if let PlannedWrite::Text { target, .. } = w
+                && !self.texts.contains(target)
+            {
+                self.texts.push(target.clone());
+            }
             w.write(t);
             return;
         };
@@ -158,8 +166,23 @@ impl UndoLog {
         g
     }
 
+    /// A group taken whose undo or redo wrote nothing goes back where it was.
+    pub(crate) fn untake(&mut self, redo: bool, g: Group) {
+        if redo {
+            self.redo.push(g)
+        } else {
+            self.undo.push(g)
+        }
+        self.publish();
+    }
+
     /// The inverse of what was just undone (`redo` false) or redone goes on the other stack.
+    /// An inverse that would do nothing is not offered (L6 review M1).
     pub(crate) fn done(&mut self, redo: bool, inverse: Group) {
+        if inverse.is_empty() {
+            self.publish();
+            return;
+        }
         if redo {
             self.undo.push(inverse)
         } else {
@@ -196,7 +219,7 @@ fn target_of(key: &KeyRef) -> Tomb {
     }
 }
 
-/// The writes that put `kw.before` back.
+/// The writes that put `kw.before` back; None when the step is skipped (counted and told).
 fn step_for(replica: &DeckDoc, kw: KeyWrite, uid: &str) -> Option<Step> {
     let (KeyRef::Slide(_, k) | KeyRef::Shape(_, k)) = &kw.key;
     let writes = if k == DEL {
@@ -208,9 +231,21 @@ fn step_for(replica: &DeckDoc, kw: KeyWrite, uid: &str) -> Option<Step> {
             // its slide come back with it when they are tombstoned too.
             Some(Value::Bool(false)) => {
                 let ws = restore_writes(replica, target, uid);
+                // A group above or the slide a peer deleted since stays deleted: Ctrl+Z takes back
+                // only my own delete (L6 review I1). The peer's delete notice offers Restore.
+                let theirs = ws.iter().any(|w| match w {
+                    PlannedWrite::Del { target: t, .. } if *t != target => tombstoned(replica, *t).is_some_and(|by| by != uid),
+                    _ => false,
+                });
+                if theirs {
+                    return None;
+                }
                 Some(if ws.is_empty() { vec![PlannedWrite::Del { target, del: false, by: uid.to_owned() }] } else { ws })
             }
-            Some(_) => return None,
+            Some(_) => {
+                log::warn!("deckcraft-live: a logged del value does not read; that step is skipped");
+                return None;
+            }
         }
     } else {
         kw.before.as_ref().map(|v| {
@@ -237,6 +272,8 @@ pub(crate) struct Ran {
     pub partial: bool,
     /// Tombstones it wrote (`true`) or lifted (`false`).
     pub dels: Vec<(Tomb, bool)>,
+    /// The texts its text undo or redo changed.
+    pub texts: Vec<TextTarget>,
 }
 
 /// Undo (`redo` false) or redo `g` on `replica`: every key still holding what `g` left gets its
@@ -246,8 +283,14 @@ pub(crate) struct Ran {
 /// # Errors
 /// A write that failed before anything was written.
 pub(crate) fn run(replica: &mut DeckDoc, g: Group, redo: bool, uid: &str) -> Result<Ran, WriteError> {
-    let mut ran = Ran { inverse: Group { slides: g.slides.clone(), ..Group::default() }, ..Ran::default() };
-    let steps: Vec<Step> = g.writes.into_iter().rev().filter_map(|kw| step_for(replica, kw, uid)).collect();
+    let mut ran = Ran { inverse: Group { slides: g.slides.clone(), texts: g.texts.clone(), ..Group::default() }, ..Ran::default() };
+    let mut steps: Vec<Step> = Vec::new();
+    for kw in g.writes.into_iter().rev() {
+        match step_for(replica, kw, uid) {
+            Some(s) => steps.push(s),
+            None => ran.skipped += 1,
+        }
+    }
     // Parts under the budget, in order.
     let mut parts: Vec<Vec<Step>> = Vec::new();
     let mut used = 0;
@@ -312,15 +355,28 @@ pub(crate) fn run(replica: &mut DeckDoc, g: Group, redo: bool, uid: &str) -> Res
         }
     }
     for _ in 0..g.text_items {
-        let u = if redo { replica.redo_text() } else { replica.undo_text() };
-        match u {
-            Some(u) => {
-                ran.updates.push(u);
-                ran.inverse.text_items += 1;
-            }
-            // The replica's undo items are gone (a new client id rebuilt it): nothing more.
-            None => break,
+        let Some((u, touched)) = (if redo { replica.redo_text() } else { replica.undo_text() }) else {
+            // The replica's undo items are gone (a new client id rebuilt it, L6 review M6): the
+            // person is told the text was not undone.
+            ran.skipped += 1;
+            break;
+        };
+        ran.updates.push(u);
+        let inside = touched.iter().all(|t| g.texts.contains(t));
+        add_texts(&mut ran.texts, touched);
+        if inside {
+            ran.inverse.text_items += 1;
+            continue;
         }
+        // yrs skips an item that changes nothing (a peer deleted all of those characters) and
+        // takes the next one, an older step of mine in another text: put that one back at
+        // once, so the older text stays and the log and the yrs stacks agree again (L6 review I2).
+        if let Some((u, back)) = if redo { replica.undo_text() } else { replica.redo_text() } {
+            ran.updates.push(u);
+            add_texts(&mut ran.texts, back);
+        }
+        ran.skipped += 1;
+        break;
     }
     // The inverse is undone in reverse again: its keys in the order `g` wrote them.
     ran.inverse.writes.reverse();
@@ -335,5 +391,22 @@ pub(crate) fn run(replica: &mut DeckDoc, g: Group, redo: bool, uid: &str) -> Res
         })
         .collect();
     ran.inverse.slides.extend(more);
+    let texts: Vec<SlideId> = ran
+        .texts
+        .iter()
+        .filter_map(|t| match t {
+            TextTarget::Shape(id) => slide_of(replica, *id),
+            TextTarget::Notes(id) => Some(*id),
+        })
+        .collect();
+    ran.inverse.slides.extend(texts);
     Ok(ran)
+}
+
+fn add_texts(into: &mut Vec<TextTarget>, more: Vec<TextTarget>) {
+    for t in more {
+        if !into.contains(&t) {
+            into.push(t);
+        }
+    }
 }

@@ -342,7 +342,8 @@ impl DeckApp<'_> {
         if self.map.partial {
             return Ok(updates);
         }
-        self.restores(replica, edits, &mut updates)?;
+        // Restores and Undo or Redo run in the order they were asked for (L6 review M4).
+        self.restores(replica, now, &mut updates)?;
         let doc = self.map.doc;
         if later.iter().any(|e| matches!(e, DeckEdit::Command(c) if c.doc == doc)) {
             self.map.resync_after = true;
@@ -352,6 +353,10 @@ impl DeckApp<'_> {
             let redo = match e {
                 DeckEdit::Undo => false,
                 DeckEdit::Redo => true,
+                DeckEdit::Restore(_) => {
+                    self.restores(replica, std::slice::from_ref(e), &mut updates)?;
+                    continue;
+                }
                 _ => continue,
             };
             self.history(replica, redo, &mut updates)?;
@@ -366,9 +371,12 @@ impl DeckApp<'_> {
     fn history(&mut self, replica: &mut DeckDoc, redo: bool, updates: &mut Vec<Vec<u8>>) -> Result<(), LocalError> {
         let m = &mut *self.map;
         let Some(g) = m.undo.take(redo) else { return Ok(()) };
+        // Kept to put back when nothing could be written (L6 review M2).
+        let kept = g.clone();
         let ran = match crate::undo::run(replica, g, redo, &m.uid) {
             Ok(r) => r,
             Err(e) => {
+                m.undo.untake(redo, kept);
                 if updates.is_empty() {
                     return Err(LocalError::Failed(e.error.to_string()));
                 }
@@ -391,6 +399,15 @@ impl DeckApp<'_> {
         for w in &ran.inverse.writes {
             if let crate::doc::KeyRef::Shape(id, _) = &w.key {
                 shapes.insert(*id);
+            }
+        }
+        // The shapes whose text it changed are written to as well (L6 review M7).
+        shapes.extend(ran.texts.iter().filter_map(|t| if let TextTarget::Shape(id) = t { Some(*id) } else { None }));
+        for u in &ran.updates {
+            let w = wire_of(u);
+            if w > WIRE_LIMIT {
+                // A text undo is one yrs update; it is not cut (L6 review M5, L8 tests the edge).
+                log::warn!("deckcraft-live: an undo update of {w} bytes is past the wire limit");
             }
         }
         let slides = ran.inverse.slides.clone();
