@@ -250,11 +250,13 @@ impl Rng {
 }
 
 /// The seeds of a random test: `DECKCRAFT_LIVE_SEED` runs that one, else
-/// `DECKCRAFT_LIVE_SEEDS` of them (1, 2, …), else `default` of them.
-pub fn seeds_or(default: u64) -> Vec<u64> {
+/// `DECKCRAFT_LIVE_SEEDS` of them (1, 2, …), else `default` (a short list, so the suite stays
+/// quick; the long run sets `DECKCRAFT_LIVE_SEEDS`).
+pub fn seeds_or(default: &[u64]) -> Vec<u64> {
     let var = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<u64>().ok());
-    match var("DECKCRAFT_LIVE_SEED") {
-        Some(one) => vec![one],
-        None => (1..=var("DECKCRAFT_LIVE_SEEDS").unwrap_or(default)).collect(),
+    match (var("DECKCRAFT_LIVE_SEED"), var("DECKCRAFT_LIVE_SEEDS")) {
+        (Some(one), _) => vec![one],
+        (None, Some(n)) => (1..=n).collect(),
+        (None, None) => default.to_vec(),
     }
 }

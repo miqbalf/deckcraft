@@ -8,13 +8,13 @@
 //! The steps ([`act`]) are generic over the hub, so the relay tests drive the same mix.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use craft_collab::{DOC_SCOPE, Hub, Replica, ServerMsg, update_to_wire};
 use craft_live::testing::ROOM;
 use craft_live::{Access, LiveStatus};
-use deckcraft_engine::{PointerKind, Session};
-use deckcraft_live::{DeckLive, deck_from_state};
+use deckcraft_engine::{Edited, PointerKind, Session};
+use deckcraft_live::{DeckEdit, DeckLive, deck_from_state};
 use deckcraft_model::{Presentation, ShapeId, Xfrm};
 use serde_json::{Value, json};
 
@@ -22,8 +22,11 @@ use crate::support::{NAME, P, Rng, Room, add_box, basic, deck_bytes, ev, seeds_o
 
 /// Steps each peer takes.
 const STEPS: usize = 300;
-/// The peer counts, by seed: the first six seeds cover 2, 8 and four counts between.
+/// The peer counts, by seed: seeds 1 to 7 cover 2 to 8 peers.
 const PEERS: [usize; 7] = [2, 8, 3, 6, 4, 7, 5];
+/// The default seeds: 8 and 3 peers, under a minute on udinpc (review minor M2). The long run,
+/// every count from 2 to 8, is `DECKCRAFT_LIVE_SEEDS=7` or more.
+const DEFAULT_SEEDS: [u64; 2] = [2, 3];
 
 /// What one step did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -46,6 +49,27 @@ pub enum Kind {
     DragStart,
     DragEnd,
 }
+
+/// Every kind, so a trace can show it ran each one.
+pub const KINDS: [Kind; 17] = [
+    Kind::Type,
+    Kind::Enter,
+    Kind::Backspace,
+    Kind::Format,
+    Kind::Move,
+    Kind::Resize,
+    Kind::Restyle,
+    Kind::Insert,
+    Kind::Duplicate,
+    Kind::Delete,
+    Kind::Reorder,
+    Kind::ZOrder,
+    Kind::Notes,
+    Kind::Undo,
+    Kind::Redo,
+    Kind::DragStart,
+    Kind::DragEnd,
+];
 
 /// The deck the session shows for `live`.
 pub fn deck_of<H: Hub>(live: &DeckLive<H>, s: &Session) -> Arc<Presentation> {
@@ -223,6 +247,10 @@ struct Tally {
     blips: usize,
     held: usize,
     joined: bool,
+    /// Steps whose intent was checked against the author's replica, per kind.
+    checked: BTreeMap<Kind, usize>,
+    /// The first step of each kind whose intent was checked.
+    first_checked: BTreeMap<Kind, usize>,
 }
 
 /// Every peer: Live, equal to peer 0, and equal to the base plus its own replica's state.
@@ -297,10 +325,106 @@ fn join_from_checkpoint(room: &mut Room, down: &[bool], drags: &[Option<Drag>]) 
     Some(i)
 }
 
+/// What the engine reported for one peer's last step: each command's `after` deck.
+type Tap = Arc<Mutex<Vec<Arc<Presentation>>>>;
+
+/// Puts a tap on peer `p`'s edit observer: the same observer `DeckLive` installs (each report
+/// goes to the session's edit queue), which also keeps the deck each command produced. That deck
+/// is the author's intent, before the mapping writes it and lands the replica's view back.
+fn tap(p: &mut P) -> Tap {
+    let tap: Tap = Arc::default();
+    let (q, keep, doc) = (p.live.core().queue(), tap.clone(), p.live.doc());
+    p.session.set_edit_observer(
+        doc,
+        Some(Box::new(move |e: Edited| {
+            keep.lock().unwrap_or_else(PoisonError::into_inner).push(e.after.clone());
+            q.push(DeckEdit::Command(Box::new(e)));
+        })),
+    );
+    tap
+}
+
+/// `deck` with each slide that has notes text marked as having a notes slide. The rebuild marks
+/// a slide whose notes were typed live that way (`build.rs`: notes typed live need a notes slide
+/// to be saved in), while the engine leaves the flag to the writer, so the two differ in this
+/// derived flag only, by design.
+fn notes_flag(deck: &Presentation) -> Presentation {
+    let mut d = deck.clone();
+    for s in &mut d.slides {
+        if !s.has_notes_slide && s.notes.paragraphs.iter().any(|p| !p.is_empty()) {
+            Arc::make_mut(s).has_notes_slide = true;
+        }
+    }
+    d
+}
+
+/// The first place two JSON values differ, as a path and the two values.
+fn first_difference(a: &Value, b: &Value, at: &str) -> String {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            for k in x.keys().chain(y.keys()) {
+                let (u, v) = (x.get(k).unwrap_or(&Value::Null), y.get(k).unwrap_or(&Value::Null));
+                if u != v {
+                    return first_difference(u, v, &format!("{at}.{k}"));
+                }
+            }
+            String::new()
+        }
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => x
+            .iter()
+            .zip(y)
+            .enumerate()
+            .find(|(_, (u, v))| u != v)
+            .map_or_else(String::new, |(i, (u, v))| first_difference(u, v, &format!("{at}[{i}]"))),
+        _ => format!("{at}: {a} against {b}"),
+    }
+}
+
+/// Whether the step's intent is checked, or why not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Intent {
+    Checked,
+    /// No command reported a change (navigation only, Undo and Redo, which reach the replica
+    /// through the undo hook and have their own tests in `undo.rs`).
+    Unreported,
+    /// Exempt: refused on purpose (the gate or the safety net, rule 15). The engine's report is
+    /// taken back and the deck put back, so the replica rightly lacks it.
+    Refused,
+    /// Exempt: a gesture in progress or just dropped. An open drag is shared at the drop (Ruling
+    /// D12); a drop reaches the replica at the next pump, which also lands the remote changes
+    /// held during the drag (Ruling D6), so the replica is not the drop's alone.
+    Gesture,
+}
+
+/// The author's step is in its own replica (review I1): the deck the engine produced for the
+/// step equals the deck rebuilt from the author's replica (as a remote peer would build it),
+/// right after the step and before any pump. A change the mapping never wrote would otherwise
+/// converge silently: the author's view is landed back from the replica too, so every peer
+/// agrees on the deck without it.
+fn assert_intent(room: &Room, who: usize, kind: Kind, ok: bool, reports: &[Arc<Presentation>], what: &str) -> Intent {
+    let p = &room.peers[who];
+    if matches!(kind, Kind::DragStart | Kind::DragEnd) || p.live.holding() {
+        return Intent::Gesture;
+    }
+    let Some(after) = reports.last() else { return Intent::Unreported };
+    if !ok {
+        return Intent::Refused;
+    }
+    let (after, rebuilt) = (notes_flag(after), notes_flag(&p.rebuilt()));
+    if after != rebuilt {
+        panic!(
+            "{what}: the step's change is not in the author's replica (it was not written); first difference, engine against replica: {}",
+            first_difference(&serde_json::to_value(&after).unwrap_or_default(), &serde_json::to_value(&rebuilt).unwrap_or_default(), "")
+        );
+    }
+    Intent::Checked
+}
+
 fn trace(seed: u64) -> Tally {
     let peers = PEERS[usize::try_from((seed - 1) % 7).unwrap_or(0)];
     let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ 0x6465_636b);
     let mut room = Room::new(basic(), peers, seed);
+    let mut taps: Vec<Tap> = room.peers.iter_mut().map(tap).collect();
     // Each peer's steps, shuffled together; the joiner takes the slot `peers` once it is in.
     let mut schedule: Vec<usize> = (0..=peers).flat_map(|p| std::iter::repeat_n(p, STEPS)).collect();
     for i in (1..schedule.len()).rev() {
@@ -312,10 +436,11 @@ fn trace(seed: u64) -> Tally {
     let mut t = Tally::default();
     for (step, slot) in schedule.into_iter().enumerate() {
         if step == join_at
-            && let Some(_j) = join_from_checkpoint(&mut room, &down, &drags)
+            && let Some(j) = join_from_checkpoint(&mut room, &down, &drags)
         {
             down.push(false);
             drags.push(None);
+            taps.push(tap(&mut room.peers[j]));
             t.joined = true;
         }
         // Before the joiner is in, its slots go to a drawn peer.
@@ -337,10 +462,17 @@ fn trace(seed: u64) -> Tally {
             room.restore_link(who);
             t.blips += 1;
         }
+        taps[who].lock().unwrap_or_else(PoisonError::into_inner).clear();
         let p = &mut room.peers[who];
         let (kind, ok) = act(&mut p.live, &mut p.session, &mut rng, &mut drags[who]);
         p.notices.extend(p.live.take_notices());
         *if ok { t.ran.entry(kind) } else { t.refused.entry(kind) }.or_default() += 1;
+        let reports = std::mem::take(&mut *taps[who].lock().unwrap_or_else(PoisonError::into_inner));
+        let intent = assert_intent(&room, who, kind, ok, &reports, &format!("seed {seed}, step {step}, peer {who}, {kind:?}"));
+        if intent == Intent::Checked {
+            *t.checked.entry(kind).or_default() += 1;
+            t.first_checked.entry(kind).or_insert(step);
+        }
         // Some peers pump, in a drawn order: delivery is seeded.
         let mut order: Vec<usize> = (0..room.peers.len()).collect();
         for i in (1..order.len()).rev() {
@@ -368,26 +500,47 @@ fn trace(seed: u64) -> Tally {
 
 #[test]
 fn random_traces_converge_2_to_8_peers() {
-    for seed in seeds_or(6) {
+    for seed in seeds_or(&DEFAULT_SEEDS) {
+        let started = std::time::Instant::now();
         let t = trace(seed);
         let peers = PEERS[usize::try_from((seed - 1) % 7).unwrap_or(0)];
         eprintln!(
-            "seed {seed}: {peers} peers; ran {:?}; refused {:?}; drops {}, rejoins {}, drop-and-rejoin between pumps {}, pumps holding for a drag {}, checkpoint joiner {}",
-            t.ran, t.refused, t.drops, t.rejoins, t.blips, t.held, t.joined
+            "seed {seed}: {peers} peers; ran {:?}; refused {:?}; drops {}, rejoins {}, drop-and-rejoin between pumps {}, pumps holding for a drag {}, checkpoint joiner {}; intent checked {:?}, first at step {:?}; {:.1} s",
+            t.ran,
+            t.refused,
+            t.drops,
+            t.rejoins,
+            t.blips,
+            t.held,
+            t.joined,
+            t.checked,
+            t.first_checked,
+            started.elapsed().as_secs_f64()
         );
-        let kinds = [Kind::Type, Kind::Enter, Kind::Backspace, Kind::Move, Kind::Restyle, Kind::Insert, Kind::Delete, Kind::Undo];
-        for k in kinds {
+        for k in KINDS {
             assert!(t.ran.get(&k).copied().unwrap_or(0) > 0, "seed {seed}: the trace ran a {k:?} step");
+        }
+        // Every command kind had its intent checked; Undo and Redo go through the undo hook and
+        // drags are exempt (see `Intent`).
+        for k in KINDS.into_iter().filter(|k| !matches!(k, Kind::Undo | Kind::Redo | Kind::DragStart | Kind::DragEnd)) {
+            assert!(t.checked.get(&k).copied().unwrap_or(0) > 0, "seed {seed}: a {k:?} step had its intent checked");
         }
         assert!(t.joined, "seed {seed}: the checkpoint joiner joined");
     }
 }
 
 /// Two peers each insert 1,000 shapes at once: every id is new, minted from its author's
-/// space, and both decks hold all 2,000 (spec: concurrent minting never collides).
+/// space, and both decks hold all 2,000 (spec: concurrent minting never collides). Both work on
+/// the same slide at a time, 50 inserts each, then move on to the next of 20 slides together:
+/// a slide of 2,000 shapes would make each insert's planning slow without testing more.
 #[test]
 fn ids_minted_concurrently_never_collide() {
-    let bytes = deck_bytes(|s| add_box(s, "anchor", [10.0, 10.0, 50.0, 20.0]));
+    let bytes = deck_bytes(|s| {
+        add_box(s, "anchor", [10.0, 10.0, 50.0, 20.0]);
+        for _ in 1..20 {
+            s.execute("slide.new", &json!({"layout": "blank"})).expect("slide");
+        }
+    });
     let mut r = Room::new(bytes, 2, 41);
     let ids_of = |p: &Presentation| -> Vec<u32> {
         let mut out = Vec::new();
@@ -400,6 +553,11 @@ fn ids_minted_concurrently_never_collide() {
     let spaces = [r.peers[0].space(), r.peers[1].space()];
     assert!(spaces[0] != spaces[1] && spaces.iter().all(|s| *s != 0), "two spaces: {spaces:?}");
     for n in 0..1000 {
+        if n % 50 == 0 {
+            for p in &mut r.peers {
+                p.run("slide.go", json!({"index": n / 50})).expect("go");
+            }
+        }
         for p in &mut r.peers {
             let rect = [(n % 40) as f64 * 15.0, (n / 40) as f64 * 15.0, 12.0, 12.0];
             p.run("shape.insert", json!({"preset": "rect", "rect": rect})).expect("insert");
