@@ -208,7 +208,16 @@ impl Room {
                 continue;
             }
             let shown = p.doc();
-            assert!(*shown == p.rebuilt(), "peer {i} shows what its replica describes");
+            let rebuilt = p.rebuilt();
+            assert!(
+                *shown == rebuilt,
+                "peer {i} shows what its replica describes; first difference, shown against rebuilt: {}",
+                crate::trace::first_difference(
+                    &serde_json::to_value(&*shown).unwrap_or_default(),
+                    &serde_json::to_value(&rebuilt).unwrap_or_default(),
+                    ""
+                )
+            );
         }
     }
 

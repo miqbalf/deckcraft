@@ -24,9 +24,9 @@ use crate::support::{NAME, P, Rng, Room, add_box, basic, deck_bytes, ev, seeds_o
 const STEPS: usize = 300;
 /// The peer counts, by seed: seeds 1 to 7 cover 2 to 8 peers.
 const PEERS: [usize; 7] = [2, 8, 3, 6, 4, 7, 5];
-/// The default seeds: 8 and 3 peers, under a minute on udinpc (review minor M2). The long run,
-/// every count from 2 to 8, is `DECKCRAFT_LIVE_SEEDS=7` or more.
-const DEFAULT_SEEDS: [u64; 2] = [2, 3];
+/// The default seeds: 2, 8 and 3 peers, about a minute on udinpc (review minors M2, F3). The
+/// long run, every count from 2 to 8, is `DECKCRAFT_LIVE_SEEDS=7` or more.
+const DEFAULT_SEEDS: [u64; 3] = [1, 2, 3];
 
 /// What one step did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,21 +94,60 @@ pub struct Drag {
 /// One random step by one peer. A peer with an open drag only moves it on or drops it. The
 /// result says what was tried and whether the command ran (a refusal is a valid outcome: the
 /// gate, a deleted target, nothing to undo).
+/// (The relay tests use it; they build with `native-hub` only.)
+#[cfg_attr(not(feature = "native-hub"), allow(dead_code))]
 pub fn act<H: Hub>(live: &mut DeckLive<H>, s: &mut Session, rng: &mut Rng, drag: &mut Option<Drag>) -> (Kind, bool) {
+    let (kind, _, ok) = act_named(live, s, rng, drag);
+    (kind, ok)
+}
+
+/// Commands that only move the caret, the selection or the view.
+const NAVIGATION: [&str; 5] = ["text.exit", "slide.go", "text.edit", "edit.select", "edit.deselect"];
+
+/// Every command a trace step can change the deck with (Undo and Redo apart), for the
+/// per-command tally (review P1). Drags (`pointer`) are exempt, see `Intent::Gesture`.
+const COMMANDS: [&str; 21] = [
+    "text.insert",
+    "text.delete",
+    "format.bold",
+    "format.italic",
+    "format.size",
+    "format.color",
+    "shape.move",
+    "shape.resize",
+    "shape.fill",
+    "shape.line",
+    "shape.insert",
+    "slide.new",
+    "edit.duplicate",
+    "slide.duplicate",
+    "edit.delete",
+    "slide.delete",
+    "slide.move",
+    "arrange.bringToFront",
+    "arrange.bringForward",
+    "arrange.sendBackward",
+    "arrange.sendToBack",
+];
+
+/// [`act`], also naming the last command that is not navigation (`pointer` for a drag, empty
+/// when the step ran only navigation).
+#[allow(clippy::cognitive_complexity)] // One match over the step kinds, as in `act` before it named the command.
+pub fn act_named<H: Hub>(live: &mut DeckLive<H>, s: &mut Session, rng: &mut Rng, drag: &mut Option<Drag>) -> (Kind, &'static str, bool) {
     if let Some(d) = drag.as_mut() {
         let (dx, dy) = (rng.below(30) as f64 - 10.0, rng.below(30) as f64 - 10.0);
         if rng.chance(40) {
             d.x += dx;
             d.y += dy;
-            return (Kind::DragStart, s.pointer(ev(PointerKind::Drag, d.x, d.y)).is_ok());
+            return (Kind::DragStart, "pointer", s.pointer(ev(PointerKind::Drag, d.x, d.y)).is_ok());
         }
         let ok = s.pointer(ev(PointerKind::Up, d.x + dx, d.y + dy)).is_ok();
         *drag = None;
-        return (Kind::DragEnd, ok);
+        return (Kind::DragEnd, "pointer", ok);
     }
     let deck = deck_of(live, s);
     if deck.slides.is_empty() {
-        return (Kind::Insert, live.run(s, "slide.new", &json!({"layout": "titleOnly", "title": "Again"})).is_ok());
+        return (Kind::Insert, "slide.new", live.run(s, "slide.new", &json!({"layout": "titleOnly", "title": "Again"})).is_ok());
     }
     let k = rng.below(deck.slides.len());
     let slide = &deck.slides[k];
@@ -122,10 +161,15 @@ pub fn act<H: Hub>(live: &mut DeckLive<H>, s: &mut Session, rng: &mut Rng, drag:
     });
     let top = (!tops.is_empty()).then(|| tops[rng.below(tops.len())]);
     let text = (!texts.is_empty()).then(|| texts[rng.below(texts.len())].clone());
+    let mut cmd: &'static str = "";
     macro_rules! run {
-        ($id:expr, $p:expr) => {
-            live.run(s, $id, &$p).is_ok()
-        };
+        ($id:expr, $p:expr) => {{
+            let id: &'static str = $id;
+            if !NAVIGATION.contains(&id) {
+                cmd = id;
+            }
+            live.run(s, id, &$p).is_ok()
+        }};
     }
     // Steps start from the slide they touch and from nothing selected.
     let _ = run!("text.exit", json!({}));
@@ -227,6 +271,7 @@ pub fn act<H: Hub>(live: &mut DeckLive<H>, s: &mut Session, rng: &mut Rng, drag:
                 let down = s.pointer(ev(PointerKind::Down, cx, cy)).is_ok();
                 let moved = down && s.pointer(ev(PointerKind::Drag, cx + 12.0, cy + 8.0)).is_ok();
                 if down {
+                    cmd = "pointer";
                     *drag = Some(Drag { x: cx + 12.0, y: cy + 8.0 });
                 }
                 moved
@@ -234,7 +279,7 @@ pub fn act<H: Hub>(live: &mut DeckLive<H>, s: &mut Session, rng: &mut Rng, drag:
             _ => false,
         },
     };
-    (kind, ok)
+    (kind, cmd, ok)
 }
 
 /// What a trace did: steps run and refused per kind, and the link events.
@@ -251,6 +296,12 @@ struct Tally {
     checked: BTreeMap<Kind, usize>,
     /// The first step of each kind whose intent was checked.
     first_checked: BTreeMap<Kind, usize>,
+    /// Steps whose intent was checked, per command (review P1).
+    checked_cmd: BTreeMap<&'static str, usize>,
+    /// Command steps exempt as a gesture only because the peer held remote changes (review F1).
+    held_exempt: BTreeMap<Kind, usize>,
+    /// Command steps with no report whose author's deck was checked against its replica (review F2).
+    unreported_same: usize,
 }
 
 /// Every peer: Live, equal to peer 0, and equal to the base plus its own replica's state.
@@ -359,7 +410,7 @@ fn notes_flag(deck: &Presentation) -> Presentation {
 }
 
 /// The first place two JSON values differ, as a path and the two values.
-fn first_difference(a: &Value, b: &Value, at: &str) -> String {
+pub fn first_difference(a: &Value, b: &Value, at: &str) -> String {
     match (a, b) {
         (Value::Object(x), Value::Object(y)) => {
             for k in x.keys().chain(y.keys()) {
@@ -464,14 +515,37 @@ fn trace(seed: u64) -> Tally {
         }
         taps[who].lock().unwrap_or_else(PoisonError::into_inner).clear();
         let p = &mut room.peers[who];
-        let (kind, ok) = act(&mut p.live, &mut p.session, &mut rng, &mut drags[who]);
+        let (kind, cmd, ok) = act_named(&mut p.live, &mut p.session, &mut rng, &mut drags[who]);
         p.notices.extend(p.live.take_notices());
         *if ok { t.ran.entry(kind) } else { t.refused.entry(kind) }.or_default() += 1;
         let reports = std::mem::take(&mut *taps[who].lock().unwrap_or_else(PoisonError::into_inner));
         let intent = assert_intent(&room, who, kind, ok, &reports, &format!("seed {seed}, step {step}, peer {who}, {kind:?}"));
-        if intent == Intent::Checked {
-            *t.checked.entry(kind).or_default() += 1;
-            t.first_checked.entry(kind).or_insert(step);
+        let gesture = matches!(kind, Kind::DragStart | Kind::DragEnd);
+        let undo = matches!(kind, Kind::Undo | Kind::Redo);
+        match intent {
+            Intent::Checked => {
+                *t.checked.entry(kind).or_default() += 1;
+                *t.checked_cmd.entry(cmd).or_default() += 1;
+                t.first_checked.entry(kind).or_insert(step);
+            }
+            Intent::Gesture if !gesture => *t.held_exempt.entry(kind).or_default() += 1,
+            // A command that changed the deck must report it, or the change is never written and
+            // the next landing from the replica erases it (review F2). The author's deck after
+            // such a step equals the deck rebuilt from its replica. (Not "equals the deck before
+            // the step": the step's navigation can land remote changes the view held while a
+            // text box was open, which is a change the author did not make.)
+            Intent::Unreported if !undo => {
+                let p = &room.peers[who];
+                let (now, rebuilt) = (notes_flag(&deck_of(&p.live, &p.session)), notes_flag(&p.rebuilt()));
+                if now != rebuilt {
+                    panic!(
+                        "seed {seed}, step {step}, peer {who}, {kind:?} ({cmd}, ok {ok}): the deck changed but no command reported it; first difference, author against replica: {}",
+                        first_difference(&serde_json::to_value(&now).unwrap_or_default(), &serde_json::to_value(&rebuilt).unwrap_or_default(), "")
+                    );
+                }
+                t.unreported_same += 1;
+            }
+            _ => {}
         }
         // Some peers pump, in a drawn order: delivery is seeded.
         let mut order: Vec<usize> = (0..room.peers.len()).collect();
@@ -505,7 +579,7 @@ fn random_traces_converge_2_to_8_peers() {
         let t = trace(seed);
         let peers = PEERS[usize::try_from((seed - 1) % 7).unwrap_or(0)];
         eprintln!(
-            "seed {seed}: {peers} peers; ran {:?}; refused {:?}; drops {}, rejoins {}, drop-and-rejoin between pumps {}, pumps holding for a drag {}, checkpoint joiner {}; intent checked {:?}, first at step {:?}; {:.1} s",
+            "seed {seed}: {peers} peers; ran {:?}; refused {:?}; drops {}, rejoins {}, drop-and-rejoin between pumps {}, pumps holding for a drag {}, checkpoint joiner {}; intent checked {:?}, first at step {:?}; per command {:?}; command steps exempt while holding {:?}; unreported and equal to the replica {}; {:.1} s",
             t.ran,
             t.refused,
             t.drops,
@@ -515,6 +589,9 @@ fn random_traces_converge_2_to_8_peers() {
             t.joined,
             t.checked,
             t.first_checked,
+            t.checked_cmd,
+            t.held_exempt,
+            t.unreported_same,
             started.elapsed().as_secs_f64()
         );
         for k in KINDS {
@@ -524,6 +601,10 @@ fn random_traces_converge_2_to_8_peers() {
         // drags are exempt (see `Intent`).
         for k in KINDS.into_iter().filter(|k| !matches!(k, Kind::Undo | Kind::Redo | Kind::DragStart | Kind::DragEnd)) {
             assert!(t.checked.get(&k).copied().unwrap_or(0) > 0, "seed {seed}: a {k:?} step had its intent checked");
+        }
+        // Every command, not only every kind, had its intent checked (review P1); drags are exempt.
+        for c in COMMANDS {
+            assert!(t.checked_cmd.get(c).copied().unwrap_or(0) > 0, "seed {seed}: a {c} step had its intent checked");
         }
         assert!(t.joined, "seed {seed}: the checkpoint joiner joined");
     }
