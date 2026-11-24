@@ -59,6 +59,9 @@ pub type LiveDeck = DeckLive<BoxHub>;
 pub use deckcraft_live::RESTORE_LABEL;
 /// The live strip's status for a person with a read-only ticket.
 pub const VIEWING_TEXT: &str = "Viewing";
+/// A view-only member's badge in the presence list (its name for the screen reader, and its
+/// hover text).
+pub const PEER_VIEWING_TEXT: &str = "{name} (viewing)";
 /// The live strip's status while connected and editing.
 pub const LIVE_TEXT: &str = "Editing live";
 /// Saves the copy of edits the room could not merge ([`deckcraft_live::UNMERGED_TEXT`]).
@@ -90,6 +93,7 @@ pub const COPY_FAILED_TEXT: &str = "Your unmerged changes could not be saved to 
 pub const ENGLISH_KEYS: &[&str] = &[
     RESTORE_LABEL,
     VIEWING_TEXT,
+    PEER_VIEWING_TEXT,
     LIVE_TEXT,
     SAVE_COPY_TEXT,
     DISMISS_TEXT,
@@ -248,7 +252,7 @@ impl LiveUi {
         self.peers = self.live.pump(session);
         let ids: Vec<String> = self.peers.iter().map(|p| p.id.clone()).collect();
         self.colours = ids.iter().cloned().zip(colours_for(&ids)).collect();
-        self.bar.set(self.peers.iter().map(|p| Badge::new(p.id.clone(), p.display.clone())).collect());
+        self.bar.set(self.peers.iter().map(|p| Badge::new(p.id.clone(), badge_name(p))).collect());
         self.moved.retain(|id, _| ids.contains(id));
         self.take_notices();
         // Taken after every pump: each hand-over since the last take is in the newest copy.
@@ -764,6 +768,16 @@ pub(crate) fn status_strip(app: &mut SlideApp, ui: &mut Ui) {
             }
         }
         None => {}
+    }
+}
+
+/// A member's name on its badge in the presence list: a view-only member is labelled
+/// [`PEER_VIEWING_TEXT`] (the relay's access, C13); an editor, or a member of an older relay that
+/// does not say, is its name alone.
+fn badge_name(peer: &Peer) -> String {
+    match peer.access {
+        craft_live::Access::Read => fill(PEER_VIEWING_TEXT, &[("name", &peer.display)]),
+        craft_live::Access::Edit => peer.display.clone(),
     }
 }
 

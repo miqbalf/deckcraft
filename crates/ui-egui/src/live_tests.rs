@@ -313,6 +313,47 @@ fn viewer_is_labelled_viewing() {
     room.h.get_by_label(VIEWING_TEXT);
 }
 
+/// The label of a view-only member's badge in the presence list.
+fn viewing(name: &str) -> String {
+    super::live::fill(super::live::PEER_VIEWING_TEXT, &[("name", name)])
+}
+
+/// A member whose ticket only views is labelled "viewing" in the presence list, as the relay
+/// says (C13, `Peer.access`).
+#[test]
+fn a_view_only_peer_is_labelled_viewing() {
+    let mut room = Room::new(&deck(false), Access::Edit, Access::Read);
+    room.settle();
+    room.h.get_by_role_and_label(Role::Button, &viewing("Bob"));
+    assert!(room.h.query_by_role_and_label(Role::Button, "Bob").is_none(), "not without the label");
+}
+
+/// An editor's badge carries no label.
+#[test]
+fn an_editor_is_not_labelled() {
+    let mut room = Room::editors(&deck(false));
+    room.settle();
+    room.h.get_by_role_and_label(Role::Button, "Bob");
+    assert!(room.h.query_by_role_and_label(Role::Button, &viewing("Bob")).is_none());
+}
+
+/// An older relay sends no access in its roster: everyone reads as an editor, so nobody is
+/// labelled, as before C13.
+#[test]
+fn a_peer_from_an_old_relay_is_not_labelled() {
+    let mut room = Room::new(&deck(false), Access::Edit, Access::Read);
+    room.settle();
+    room.h.get_by_role_and_label(Role::Button, &viewing("Bob"));
+    let entry = |hub: &MemHub, name: &str| {
+        serde_json::from_value::<craft_collab::Presence>(json!({"peer": room.relay.peer_id(hub), "display": name})).expect("an old roster entry")
+    };
+    let roster = vec![entry(&room.ann_hub, "Ann"), entry(room.bob.live.core().hub(), "Bob")];
+    room.relay.inject(&room.ann_hub, craft_collab::ServerMsg::Presence { doc: ROOM.into(), roster });
+    room.h.run_steps(2);
+    room.h.get_by_role_and_label(Role::Button, "Bob");
+    assert!(room.h.query_by_role_and_label(Role::Button, &viewing("Bob")).is_none(), "no access read as edit");
+}
+
 #[test]
 fn the_canvas_stays_on_my_slide_when_a_peer_reorders() {
     let mut room = Room::editors(&deck(false));
