@@ -445,7 +445,11 @@ impl SlideApp {
     /// within one round trip).
     #[must_use]
     pub fn live_unconfirmed(&self) -> bool {
-        self.live.as_ref().is_some_and(|lu| lu.live.core().live().unconfirmed_edits() > 0)
+        // A link that ended handed its unconfirmed edits over as the copy, which counts on its own
+        // (U2 fix-1 review N1).
+        self.live.as_ref().is_some_and(|lu| {
+            !matches!(lu.live.status(), LiveStatus::Broken(_) | LiveStatus::Refused(_)) && lu.live.core().live().unconfirmed_edits() > 0
+        })
     }
 
     /// The window is about to close: the live session ends, and waiting copies are offered.

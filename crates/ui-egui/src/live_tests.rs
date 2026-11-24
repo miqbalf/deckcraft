@@ -526,6 +526,34 @@ fn a_host_end_while_offline_hands_the_copy_over() {
     assert!(!room.h.state().copies_unsaved(), "stored");
 }
 
+/// After the link ended with edits the room never confirmed, they are in the copy: the page is
+/// not told of unsaved work for them any more (U2 fix-1 review N1); the copy counts until stored.
+#[test]
+fn a_broken_link_counts_no_unconfirmed_edits() {
+    let (copies, downloads) = (HostLog::default(), HostLog::default());
+    let (services, saves) = answering(&copies, &downloads);
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, services);
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.relay.drop_link(&room.ann_hub);
+    room.settle();
+    let app = room.h.state_mut();
+    app.run("slide.go", json!({"index": 1})).unwrap();
+    app.run("text.edit", json!({"id": alpha.0})).unwrap();
+    app.run("text.insert", json!({"text": "offline"})).unwrap();
+    room.h.run_steps(1);
+    assert!(room.h.state().live_unconfirmed(), "unconfirmed while reconnecting");
+    room.h.state_mut().end_live_for("The live session was restarted. Reopen the file.");
+    room.h.run_steps(2);
+    room.h.state_mut().hand_over_copies();
+    assert!(room.h.state().live.is_some(), "the broken presentation stays open");
+    assert!(!room.h.state().live_unconfirmed(), "a broken link's edits are in the copy");
+    assert!(room.h.state().copies_unsaved(), "the copy counts until the page stores it");
+    let id = sent_id(&room);
+    saves.answer(crate::HostAnswer::Saved { id, name: None });
+    room.h.run_steps(1);
+    assert!(!room.h.state().live_unconfirmed() && !room.h.state().copies_unsaved(), "nothing unsaved");
+}
+
 /// Quitting the window ends the live session first; a copy that could not be saved stays offered.
 #[test]
 fn ending_the_live_session_keeps_unsent_edits() {
@@ -1057,6 +1085,31 @@ fn enter_with_nothing_selected_adds_no_slide_with_sections() {
     assert_eq!(room.ann_doc().slides.len(), slides, "Enter added no slide, not even for a frame");
     room.h.run_steps(1);
     assert_eq!(room.h.state_mut().fresh_status().as_deref(), Some(SECTIONS_TEXT), "and said why");
+}
+
+/// Enter finishes a freeform being drawn, also in a live deck with sections: the engine finishes
+/// the path before it would add a slide (U2 fix-1 review N2).
+#[test]
+fn enter_finishes_a_freeform_live_with_sections() {
+    let mut room = Room::editors(&deck(true));
+    room.h.run_steps(1);
+    let shapes = room.ann_doc().slides[0].shapes.len();
+    let ev = |kind, x, y| PointerEvent { kind, x, y, mods: Mods::default(), tol: 4.0, pressure: None };
+    {
+        let s = &mut room.h.state_mut().session;
+        s.set_tool(deckcraft_engine::tools::ToolKind::Shape { preset: "curve".into() });
+        for (x, y) in [(300.0, 300.0), (400.0, 320.0), (420.0, 400.0)] {
+            s.pointer(ev(PointerKind::Down, x, y)).unwrap();
+            s.pointer(ev(PointerKind::Up, x, y)).unwrap();
+        }
+        assert!(s.tool.drawing_freeform(), "drawing");
+    }
+    press(&mut room, egui::Key::Enter);
+    assert!(!room.h.state().session.tool.drawing_freeform(), "Enter finished the path");
+    assert_ne!(room.h.state_mut().fresh_status().as_deref(), Some(SECTIONS_TEXT), "and was not refused");
+    room.settle();
+    assert_eq!(room.ann_doc().slides[0].shapes.len(), shapes + 1, "the path is on the slide");
+    assert_eq!(room.bob.doc().slides[0].shapes.len(), shapes + 1, "and reached Bob");
 }
 
 /// The keys an editor types with still work live in a deck with sections: Backspace and Tab in

@@ -264,7 +264,8 @@ impl SlideApp {
     /// a slide (`Session::key`).
     fn context_key_command(&self, name: &str, mods: Mods) -> Option<&'static str> {
         let st = self.session.active()?;
-        let idle = st.selection.text.is_none() && st.selection.shapes.is_empty() && !mods.cmd;
+        // A freeform being drawn takes Enter first: the engine finishes it (U2 fix-1 review N2).
+        let idle = st.selection.text.is_none() && st.selection.shapes.is_empty() && !mods.cmd && !self.session.tool.drawing_freeform();
         (idle && name == "Enter").then_some("slide.new")
     }
 
