@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use craft_live::Access;
+use craft_live::{Access, LiveStatus};
 use craft_live::testing::{MemHub, MemRelay, ROOM};
 use deckcraft_engine::{Mods, PointerEvent, PointerKind, Session};
 use deckcraft_live::{BaseFile, DeckLive, MEDIA_TEXT, NOT_YET_TEXT, READ_ONLY_TEXT, SECTIONS_TEXT};
@@ -524,6 +524,31 @@ fn a_host_end_while_offline_hands_the_copy_over() {
     saves.answer(crate::HostAnswer::Saved { id, name: None });
     room.h.run_steps(1);
     assert!(!room.h.state().copies_unsaved(), "stored");
+}
+
+/// A refused link (an expired ticket at the reconnect) can recover and makes no copy: edits the
+/// room never confirmed still count as unsaved for the page, so closing the tab asks first
+/// (U3 review I1).
+#[test]
+fn a_refused_link_still_counts_its_unconfirmed_edits() {
+    let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.relay.drop_link(&room.ann_hub);
+    room.settle();
+    let app = room.h.state_mut();
+    app.run("slide.go", json!({"index": 1})).unwrap();
+    app.run("text.edit", json!({"id": alpha.0})).unwrap();
+    app.run("text.insert", json!({"text": "offline"})).unwrap();
+    room.h.run_steps(1);
+    // The reconnect is refused for its expired ticket before any join: the refusal is read,
+    // and the link stays down, so the offline text is not sent.
+    room.relay.refuse(&room.ann_hub, "auth", "the ticket expired");
+    room.relay.drop_link_after_read(&room.ann_hub);
+    room.h.run_steps(3);
+    let status = room.h.state().live.as_ref().map(|l| l.live().status().clone());
+    assert!(matches!(status, Some(LiveStatus::Refused(_))), "refused: {status:?}");
+    assert!(room.h.state().live_unconfirmed(), "the offline text is still unconfirmed");
+    assert!(!room.h.state().copies_unsaved(), "and no copy was made of it");
 }
 
 /// After the link ended with edits the room never confirmed, they are in the copy: the page is
