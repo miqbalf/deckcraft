@@ -364,3 +364,31 @@ fn the_window_is_rebuilt_after_commands_dropped_behind_an_undo() {
     assert!(x_of(&r, 1, b) > x0, "the next edit is shared");
     r.assert_converged();
 }
+
+/// The lock a peer holds lapses and goes to another (L6 review M8, U2 fix-1 concern 3, room
+/// level): its edit under the old grant is refused and taken back out of its replica, which
+/// craft-live restarts the mapping for (`reset`). My undo step for that edit goes with it, and
+/// both windows agree. DeckCraft M1 takes no locks itself; the test takes one on the core.
+#[test]
+fn a_taken_back_edit_takes_my_undo_steps_with_it() {
+    const SCOPE: &str = "deck/struct";
+    let mut r = Room::new(basic(), 2, 17);
+    let a = find(&r.peers[0].doc(), "alpha");
+    let fill0 = fill_of(&r, 1, a);
+    r.peers[0].live.core_mut().lock(SCOPE).expect("lock");
+    r.pump(0);
+    let granted = r.peers[0].live.core_mut().take_lock_events();
+    assert!(matches!(granted.last(), Some(craft_collab::LockEvent::Granted { token: Some(_), .. })), "{granted:?}");
+    // A pauses past its lease: the scope goes to B.
+    r.relay.lapse(SCOPE);
+    r.peers[1].live.core_mut().lock(SCOPE).expect("lock");
+    r.pump(1);
+    r.peers[1].live.core_mut().take_lock_events();
+    // A edits under its old grant: refused by the relay, taken back.
+    r.peers[0].run("shape.fill", json!({"ids": [a.0], "color": "#C00000"})).expect("fill");
+    assert!(r.peers[0].live.can_undo(), "a step to undo before the take-back");
+    r.settle();
+    assert!(!r.peers[0].live.can_undo(), "the step went with the replaced replica");
+    assert!(fill_of(&r, 0, a) == fill0 && fill_of(&r, 1, a) == fill0, "the refused fill is gone everywhere");
+    r.assert_converged();
+}

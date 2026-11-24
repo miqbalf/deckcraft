@@ -588,3 +588,60 @@ fn group_children_follow_their_parent() {
         assert!(deck.slides[0].shape(id).is_none());
     }
 }
+
+fn varint(out: &mut Vec<u8>, mut n: u64) {
+    while n >= 0x80 {
+        out.push((n as u8 & 0x7f) | 0x80);
+        n >>= 7;
+    }
+    out.push(n as u8);
+}
+
+/// An update of `blocks` one-clock GC blocks from client 127: more items than an op may carry
+/// when `blocks` passes the op cap, and fits anywhere.
+fn gc_flood(blocks: u64) -> Vec<u8> {
+    let mut u = vec![1];
+    varint(&mut u, blocks);
+    u.extend([0x7f, 0]);
+    for _ in 0..blocks {
+        u.extend([0, 1]);
+    }
+    u.push(0);
+    u
+}
+
+/// c9-save2: a checkpoint the room ordered is replayed with `apply_state` (craft-collab takes it
+/// so on landing, when held, and in a take-back). DeckDoc names what it changed, as for an op,
+/// and checks it under the state item cap, not the op cap.
+#[test]
+fn a_checkpoint_replays_into_deckdoc_as_a_state() {
+    let base = mixed();
+    let seeded = DeckDoc::seeded(&seed_of(&base)).expect("seed");
+    let (mut a, mut b) = (peer(&seeded, 3), peer(&seeded, 4));
+    let title = base.slides[0].shapes[0].id;
+    let u = a.write(false, |t| {
+        t.set_shape(title, "fill", json!(null));
+        Ok(())
+    });
+    u.expect("write");
+    let ops = vec![TextOp::Insert { at: 0, chunks: vec![Chunk::Text { text: "Hi ".into(), attrs: vec![] }] }];
+    a.write(true, |t| {
+        t.text_ops(TextTarget::Shape(title), &ops);
+        Ok(())
+    })
+    .expect("write");
+    // The checkpoint: the whole document, as the service writes it.
+    let checkpoint = a.state();
+    let changes = Replica::apply_state(&mut b, &checkpoint).expect("apply_state");
+    assert!(changes.contains(&DeckChange::Shapes(vec![title])), "{changes:?}");
+    assert!(changes.contains(&DeckChange::Text(title)), "{changes:?}");
+    assert_eq!(deck_from_doc(&base, &a), deck_from_doc(&base, &b), "the checkpoint replayed whole");
+    assert_eq!(Replica::apply_state(&mut b, &checkpoint).expect("again"), Vec::<DeckChange>::new(), "a replay changes nothing");
+    // Past the op item cap (2^20) and under the state cap (2^22): refused as an op, taken as a checkpoint.
+    let flood = gc_flood(2 << 20);
+    let mut c = peer(&seeded, 5);
+    assert_eq!(c.apply(&flood), Err(craft_collab::LiveError::TooLarge), "too many items for an op");
+    Replica::apply_state(&mut c, &flood).expect("a checkpoint may hold more");
+    assert!(!c.damaged(), "the replica stays sound");
+    assert_eq!(deck_from_doc(&base, &c), deck_from_doc(&base, &seeded), "and the deck is unchanged");
+}

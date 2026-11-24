@@ -715,6 +715,15 @@ impl Replica for DeckDoc {
         r.map(|()| DeckDoc::changes(seen))
     }
 
+    /// A checkpoint the room ordered (the whole document): as [`apply`](Self::apply), checked
+    /// under the state item cap (c9-save2).
+    fn apply_state(&mut self, update: &[u8]) -> Result<Vec<DeckChange>, LiveError> {
+        self.settle();
+        let r = self.y.apply_state(update);
+        let seen = self.settle();
+        r.map(|()| DeckDoc::changes(seen))
+    }
+
     fn state(&self) -> Vec<u8> {
         self.y.state()
     }
