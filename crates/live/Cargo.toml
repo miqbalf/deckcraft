@@ -36,3 +36,8 @@ chrono = { workspace = true, features = ["clock"] }
 [dev-dependencies]
 proptest = { workspace = true }
 craft-live = { workspace = true, features = ["test-util"] }
+# The relay tests (feature `native-hub`): mint relay tickets (HMAC-SHA256 over the base64url
+# payload) and drive the native hub. All three are already in Cargo.lock.
+base64 = "0.23"
+hmac = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

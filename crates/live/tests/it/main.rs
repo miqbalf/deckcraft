@@ -6,8 +6,11 @@ mod hold;
 mod order;
 mod presence;
 mod reconnect;
+#[cfg(feature = "native-hub")]
+mod relay;
 mod support;
 mod text;
 mod tomb;
+mod trace;
 mod undo;
 mod wire;

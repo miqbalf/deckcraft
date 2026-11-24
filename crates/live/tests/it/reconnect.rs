@@ -336,3 +336,31 @@ fn a_host_end_with_nothing_unconfirmed_makes_no_copy() {
     r.pump(0);
     assert!(r.peers[0].live.take_unmerged().is_none(), "no copy");
 }
+
+/// The reconnect after offline edits is refused (an expired ticket, U3 review I1): the status
+/// is Refused, which can recover, so no copy is made and the edits wait. With a fresh ticket the
+/// rejoin is granted and they reach the room.
+#[test]
+fn a_refused_reconnect_keeps_the_offline_edits_for_the_rejoin() {
+    let mut r = Room::new(basic(), 2, 26);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.drop_link(0);
+    r.pump_all();
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit offline");
+    r.peers[0].run("text.insert", json!({"text": "refused "})).expect("type offline");
+    let hub = r.peers[0].live.core().hub();
+    r.relay.refuse(hub, craft_collab::REFUSED_AUTH, "the ticket expired");
+    r.relay.drop_link_after_read(hub);
+    for _ in 0..3 {
+        r.pump_all();
+    }
+    assert!(matches!(r.peers[0].live.status(), LiveStatus::Refused(_)), "{:?}", r.peers[0].live.status());
+    assert!(r.peers[0].live.take_unmerged().is_none(), "a refusal that can recover makes no copy");
+    assert!(text_of(&r, 0, a).contains("refused"), "the offline text is still shown");
+    assert!(!text_of(&r, 1, a).contains("refused"), "and has not reached the room");
+    r.restore_link(0);
+    r.settle();
+    assert!(text_of(&r, 1, a).contains("refused"), "the offline text arrived after the granted rejoin");
+    assert!(matches!(r.peers[0].live.status(), LiveStatus::Live { .. }), "{:?}", r.peers[0].live.status());
+    r.assert_converged();
+}

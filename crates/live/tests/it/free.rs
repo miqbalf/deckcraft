@@ -344,3 +344,19 @@ fn the_gate_bound_covers_every_real_update() {
     r.settle();
     r.assert_converged();
 }
+
+/// A z-order change reaches the other peer: the shape is drawn on top there too (L8: the traces
+/// converge whether or not a reorder is shared, so this pins that it is).
+#[test]
+fn bring_to_front_reaches_the_other_peer() {
+    let mut r = Room::new(basic(), 2, 9);
+    let a = find(&r.peers[0].doc(), "alpha");
+    let order = |r: &Room, i: usize| -> Vec<ShapeId> { r.peers[i].doc().slides[0].shapes.iter().map(|s| s.id).collect() };
+    assert!(order(&r, 1).last() != Some(&a), "alpha starts below the others");
+    r.peers[0].run("arrange.bringToFront", json!({"ids": [a.0]})).expect("bring to front");
+    r.settle();
+    for i in 0..2 {
+        assert_eq!(order(&r, i).last(), Some(&a), "peer {i} draws alpha on top");
+    }
+    r.assert_converged();
+}
