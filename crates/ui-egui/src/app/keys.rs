@@ -110,6 +110,11 @@ impl SlideApp {
             return;
         }
         let refused = self.live_typing_refused();
+        // A browser hands over Ctrl+C/X/V twice: the key press and then the DOM clipboard event
+        // (eframe's web runner), in the same batch. The clipboard event is the one that carries
+        // the system clipboard, so the key is dropped; run as well, it pasted twice, and a second
+        // cut found nothing selected and cut the slide (DP1). egui-winit sends only the event.
+        let clip_events = clipboard_events(&events);
         if image_paste {
             self.paste_clipboard_image(refused);
         }
@@ -201,6 +206,9 @@ impl SlideApp {
                         continue;
                     }
                     let mods = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command || modifiers.ctrl };
+                    if mods.cmd && !mods.shift && !mods.alt && clip_events.covers(key) {
+                        continue;
+                    }
                     if !self.session.tool.drawing_freeform() && menus::ui_shortcut(self, key, mods) {
                         continue;
                     }
@@ -295,6 +303,39 @@ impl SlideApp {
         }
         ((arrow && nudges) || (editing && name == "Tab")).then_some(why)
     }
+}
+
+/// Which clipboard events a batch of input holds.
+#[derive(Clone, Copy, Default)]
+struct ClipboardEvents {
+    copy: bool,
+    cut: bool,
+    paste: bool,
+}
+
+impl ClipboardEvents {
+    /// Whether the Cmd/Ctrl shortcut on `key` arrived as its clipboard event too.
+    fn covers(self, key: egui::Key) -> bool {
+        match key {
+            egui::Key::C => self.copy,
+            egui::Key::X => self.cut,
+            egui::Key::V => self.paste,
+            _ => false,
+        }
+    }
+}
+
+fn clipboard_events(events: &[egui::Event]) -> ClipboardEvents {
+    let mut c = ClipboardEvents::default();
+    for e in events {
+        match e {
+            egui::Event::Copy => c.copy = true,
+            egui::Event::Cut => c.cut = true,
+            egui::Event::Paste(_) | egui::Event::PasteImage(_) => c.paste = true,
+            _ => {}
+        }
+    }
+    c
 }
 
 /// Engine key name for an egui key.

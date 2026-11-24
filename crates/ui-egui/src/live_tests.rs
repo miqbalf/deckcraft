@@ -1222,3 +1222,110 @@ fn following_an_editor_without_a_place_says_so() {
     let said = room.h.state_mut().fresh_status().unwrap_or_default();
     assert_eq!(said, super::live::fill(super::live::NO_PLACE_TEXT, &[("name", "Bob")]), "the person is told");
 }
+
+/// DP1: Ctrl+X on a selected shape in a browser (the key and the DOM `cut` in one batch) cuts the
+/// shape, not its slide; Ctrl+V pastes it back once; Bob's page converges; one Undo takes the
+/// paste back on both pages.
+#[test]
+fn web_cut_and_paste_of_a_shape_converges_and_undoes_in_one_step() {
+    let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("edit.select", json!({"ids": [alpha.0]})).unwrap();
+    room.h.run_steps(1);
+    let slides = room.ann_doc().slides.len();
+    let shapes = room.ann_doc().slides[1].shapes.len();
+    let clip = super::clipboard_tests::web_shortcut(&mut room.h, egui::Key::X, Some(egui::Event::Cut)).expect("the cut reached the clipboard");
+    room.settle();
+    for (who, d) in [("Ann", room.ann_doc()), ("Bob", room.bob.doc())] {
+        assert_eq!(d.slides.len(), slides, "{who}: no slide cut");
+        assert!(d.slides[1].shape(alpha).is_none(), "{who}: alpha is cut");
+    }
+    super::clipboard_tests::web_shortcut(&mut room.h, egui::Key::V, Some(egui::Event::Paste(clip)));
+    room.settle();
+    let texts = |d: &Presentation| d.slides[1].shapes.iter().filter(|s| s.text.as_ref().is_some_and(|t| t.text() == "alpha")).count();
+    for (who, d) in [("Ann", room.ann_doc()), ("Bob", room.bob.doc())] {
+        assert_eq!(d.slides[1].shapes.len(), shapes, "{who}: the shape is back once");
+        assert_eq!(texts(&d), 1, "{who}: one alpha");
+    }
+    assert_eq!(*room.ann_doc().slides[1], *room.bob.doc().slides[1], "the pages agree");
+    room.h.state_mut().run("edit.undo", json!({})).unwrap();
+    room.settle();
+    for (who, d) in [("Ann", room.ann_doc()), ("Bob", room.bob.doc())] {
+        assert_eq!(texts(&d), 0, "{who}: one Undo takes the paste back");
+    }
+}
+
+/// DP1: Ann's caret at the end of "alpha" (End pressed) stays at the end when Bob types at the
+/// start; what Ann types next goes after her text, on both pages.
+#[test]
+fn my_caret_follows_a_remote_insert_before_it() {
+    let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("text.edit", json!({"id": alpha.0, "at": [0, 1]})).unwrap();
+    room.h.run_steps(1);
+    let end = egui::Event::Key { key: egui::Key::End, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+    room.h.input_mut().events.push(end);
+    room.h.run_steps(1);
+    room.bob.run("slide.go", json!({"index": 1}));
+    room.bob.run("text.edit", json!({"id": alpha.0, "at": [0, 0]}));
+    room.bob.run("text.insert", json!({"text": "Bob "}));
+    room.settle();
+    room.h.input_mut().events.push(egui::Event::Text("!".into()));
+    room.h.run_steps(1);
+    room.settle();
+    for (who, d) in [("Ann", room.ann_doc()), ("Bob", room.bob.doc())] {
+        let t = d.slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text();
+        assert_eq!(t, "Bob alpha!", "{who}: Ann's text is at the end");
+    }
+}
+
+/// DP1, as the browser test does it: a double-click into the text, a remote insert at its start
+/// while the double-click is still settling, then End and typing.
+#[test]
+fn my_caret_follows_a_remote_insert_after_a_double_click() {
+    for remote_before_end in [false, true] {
+        let mut room = Room::editors(&deck(false));
+        let alpha = find(&room.ann_doc(), "alpha");
+        room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+        room.bob.run("slide.go", json!({"index": 1}));
+        room.h.run_steps(2);
+        let at = slide_to_screen(&room.h, 160.0, 100.0);
+        let press =
+            |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        room.h.input_mut().events.push(egui::Event::PointerMoved(at));
+        room.h.run_steps(1);
+        for _ in 0..2 {
+            room.h.input_mut().events.push(press(true));
+            room.h.run_steps(1);
+            room.h.input_mut().events.push(press(false));
+            room.h.run_steps(1);
+        }
+        assert!(room.ann().session.active().unwrap().selection.text.is_some(), "the double-click edits the text");
+        let end = egui::Event::Key { key: egui::Key::End, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let bob_types = |room: &mut Room| {
+            room.bob.run("text.edit", json!({"id": alpha.0, "at": [0, 0]}));
+            room.bob.run("text.insert", json!({"text": "Bob "}));
+            room.settle();
+        };
+        if remote_before_end {
+            bob_types(&mut room);
+            room.h.input_mut().events.push(end);
+            room.h.run_steps(1);
+        } else {
+            room.h.input_mut().events.push(end);
+            room.h.run_steps(1);
+            bob_types(&mut room);
+        }
+        for c in ["!", "?"] {
+            room.h.input_mut().events.push(egui::Event::Text(c.into()));
+            room.h.run_steps(1);
+        }
+        room.settle();
+        for (who, d) in [("Ann", room.ann_doc()), ("Bob", room.bob.doc())] {
+            let t = d.slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text();
+            assert_eq!(t, "Bob alpha!?", "{who}, remote before End {remote_before_end}");
+        }
+    }
+}

@@ -519,6 +519,9 @@ mod inbox_tests;
 mod host_save_tests;
 
 #[cfg(test)]
+mod clipboard_tests;
+
+#[cfg(test)]
 mod live_tests;
 
 #[cfg(test)]
