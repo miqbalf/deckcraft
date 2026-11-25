@@ -98,6 +98,8 @@ pub struct Room {
     pub peers: Vec<P>,
     rng: u64,
     pub clock: Arc<AtomicU64>,
+    /// Rebuild checks skipped because the peer was in the middle of a drag (`check_rebuild`).
+    pub rebuild_skipped_drag: std::cell::Cell<usize>,
 }
 
 impl Room {
@@ -120,7 +122,7 @@ impl Room {
             live.set_clock(Box::new(move || c.load(Ordering::Relaxed) as f64));
             peers.push(P { live, session, notices: Vec::new() });
         }
-        let mut room = Room { relay, peers, rng: seed | 1, clock };
+        let mut room = Room { relay, peers, rng: seed | 1, clock, rebuild_skipped_drag: std::cell::Cell::new(0) };
         room.settle();
         if access.iter().all(|a| *a == Access::Edit) {
             assert!(room.peers.iter().all(|p| p.live.editable()), "every editor is live");
@@ -204,10 +206,16 @@ impl Room {
 
     pub fn check_rebuild(&self) {
         for (i, p) in self.peers.iter().enumerate() {
+            if p.live.holding() || p.live.replica().is_none() {
+                continue;
+            }
             // A peer in the middle of a drag shows its own preview, which is shared only at the
             // drop (Ruling D12); a trace that settles the room then (the checkpoint joiner, seed
-            // 7) would compare that preview with the replica.
-            if p.live.holding() || p.live.replica().is_none() || p.session.remote_busy(p.live.doc()) {
+            // 7) would compare that preview with the replica. Only the drag is exempt (not any
+            // open interaction or composition), and it is counted: the final settle after every
+            // drop checks each peer again.
+            if p.session.tool.dragging() && p.session.active().is_some_and(|a| a.uid == p.live.doc()) {
+                self.rebuild_skipped_drag.set(self.rebuild_skipped_drag.get() + 1);
                 continue;
             }
             let shown = p.doc();

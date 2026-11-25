@@ -302,6 +302,8 @@ struct Tally {
     held_exempt: BTreeMap<Kind, usize>,
     /// Command steps with no report whose author's deck was checked against its replica (review F2).
     unreported_same: usize,
+    /// Rebuild checks skipped because a peer was mid-drag (`Room::check_rebuild`).
+    rebuild_skipped_drag: usize,
 }
 
 /// Every peer: Live, equal to peer 0, and equal to the base plus its own replica's state.
@@ -569,6 +571,7 @@ fn trace(seed: u64) -> Tally {
     }
     room.settle();
     assert_equal(&room, &format!("seed {seed} ({peers} peers)"));
+    t.rebuild_skipped_drag = room.rebuild_skipped_drag.get();
     t
 }
 
@@ -579,7 +582,7 @@ fn random_traces_converge_2_to_8_peers() {
         let t = trace(seed);
         let peers = PEERS[usize::try_from((seed - 1) % 7).unwrap_or(0)];
         eprintln!(
-            "seed {seed}: {peers} peers; ran {:?}; refused {:?}; drops {}, rejoins {}, drop-and-rejoin between pumps {}, pumps holding for a drag {}, checkpoint joiner {}; intent checked {:?}, first at step {:?}; per command {:?}; command steps exempt while holding {:?}; unreported and equal to the replica {}; {:.1} s",
+            "seed {seed}: {peers} peers; ran {:?}; refused {:?}; drops {}, rejoins {}, drop-and-rejoin between pumps {}, pumps holding for a drag {}, checkpoint joiner {}; intent checked {:?}, first at step {:?}; per command {:?}; command steps exempt while holding {:?}; unreported and equal to the replica {}; rebuild checks skipped mid-drag {}; {:.1} s",
             t.ran,
             t.refused,
             t.drops,
@@ -592,6 +595,7 @@ fn random_traces_converge_2_to_8_peers() {
             t.checked_cmd,
             t.held_exempt,
             t.unreported_same,
+            t.rebuild_skipped_drag,
             started.elapsed().as_secs_f64()
         );
         for k in KINDS {

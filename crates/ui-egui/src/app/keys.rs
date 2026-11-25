@@ -110,10 +110,17 @@ impl SlideApp {
             return;
         }
         let refused = self.live_typing_refused();
-        // A browser hands over Ctrl+C/X/V twice: the key press and then the DOM clipboard event
-        // (eframe's web runner), in the same batch. The clipboard event is the one that carries
-        // the system clipboard, so the key is dropped; run as well, it pasted twice, and a second
-        // cut found nothing selected and cut the slide (DP1). egui-winit sends only the event.
+        // A browser hands over a clipboard keystroke twice: the key press and then the DOM
+        // clipboard event, in the same batch. The clipboard event is the one that carries the
+        // system clipboard, so the key is dropped; run as well, it pasted twice, and a second cut
+        // found nothing selected and cut the slide (DP1). egui-winit sends only the event.
+        //
+        // "Same batch" rests on eframe's web runner at storytold/egui@6d518fc
+        // (`eframe/src/web/events.rs`): `keydown` pushes the key and does not prevent the default
+        // for C, X or V; the `copy` and `cut` handlers push their event and run the frame at once;
+        // `paste` is the keydown's default action, dispatched before the next frame. Check those
+        // three handlers when bumping eframe: if a clipboard event moves to a later frame, a
+        // keyboard paste runs twice again (the browser copy matrix in the e2e catches that).
         let clip_events = clipboard_events(&events);
         if image_paste {
             self.paste_clipboard_image(refused);
@@ -164,6 +171,21 @@ impl SlideApp {
                 egui::Event::Ime(ime) => self.ime_event(ctx, &ime),
                 egui::Event::Copy => self.publish_clipboard(ctx, false),
                 egui::Event::Cut => self.publish_clipboard(ctx, true),
+                // Paste Special's key (Ctrl+Alt+V) opened the dialog, which pastes once a format
+                // is picked; a browser's paste for the same keystroke is not a second paste.
+                egui::Event::Paste(_) if clip_events.paste_chord == Some(PasteChord::Special) => {}
+                // Paste and Match Formatting's key (Ctrl+Shift+V) was dropped for this event: it
+                // pastes the browser's text as text, once.
+                egui::Event::Paste(text) if clip_events.paste_chord == Some(PasteChord::Text) => {
+                    let params = if text.is_empty() || text == OBJECTS_MARKER { json!({}) } else { json!({"text": text}) };
+                    let revision = self.session.active().map(|d| d.revision);
+                    if let Err(e) = self.run_engine("edit.pasteText", &params) {
+                        self.set_status(e);
+                    }
+                    if self.session.active().map(|d| d.revision) != revision {
+                        self.note_application_edit(ctx);
+                    }
+                }
                 egui::Event::Paste(text) => {
                     // Our own marker for objects without text: paste what the session copied.
                     let text = if text == OBJECTS_MARKER { String::new() } else { text };
@@ -206,7 +228,7 @@ impl SlideApp {
                         continue;
                     }
                     let mods = Mods { shift: modifiers.shift, alt: modifiers.alt, cmd: modifiers.command || modifiers.ctrl };
-                    if mods.cmd && !mods.shift && !mods.alt && clip_events.covers(key) {
+                    if clip_events.covers(key, mods) {
                         continue;
                     }
                     if !self.session.tool.drawing_freeform() && menus::ui_shortcut(self, key, mods) {
@@ -311,15 +333,30 @@ struct ClipboardEvents {
     copy: bool,
     cut: bool,
     paste: bool,
+    /// The paste keystroke in the batch, when it is not a plain Ctrl+V.
+    paste_chord: Option<PasteChord>,
+}
+
+/// A paste keystroke that means more than Paste.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PasteChord {
+    /// Ctrl+Shift+V: Paste and Match Formatting.
+    Text,
+    /// Ctrl+Alt+V: Paste Special.
+    Special,
 }
 
 impl ClipboardEvents {
-    /// Whether the Cmd/Ctrl shortcut on `key` arrived as its clipboard event too.
-    fn covers(self, key: egui::Key) -> bool {
-        match key {
-            egui::Key::C => self.copy,
-            egui::Key::X => self.cut,
-            egui::Key::V => self.paste,
+    /// Whether the clipboard keystroke `key` with `m` arrived as its clipboard event too, so the
+    /// key is not run. The keys are egui-winit's (`is_copy_command` and the others): Ctrl+C or
+    /// Ctrl+Insert copy, Ctrl+X or Shift+Delete cut, Ctrl+V or Shift+Insert paste; Ctrl+Shift+V
+    /// too, whose event pastes as text. Ctrl+Alt+V keeps its key (it opens Paste Special).
+    fn covers(self, key: egui::Key, m: Mods) -> bool {
+        use egui::Key::*;
+        match (key, m.cmd, m.shift, m.alt) {
+            (C | Insert, true, false, false) => self.copy,
+            (X, true, false, false) | (Delete, false, true, false) => self.cut,
+            (V, true, _, false) | (Insert, false, true, false) => self.paste,
             _ => false,
         }
     }
@@ -332,6 +369,13 @@ fn clipboard_events(events: &[egui::Event]) -> ClipboardEvents {
             egui::Event::Copy => c.copy = true,
             egui::Event::Cut => c.cut = true,
             egui::Event::Paste(_) | egui::Event::PasteImage(_) => c.paste = true,
+            egui::Event::Key { key: egui::Key::V, pressed: true, modifiers: m, .. } if m.command || m.ctrl => {
+                c.paste_chord = match (m.shift, m.alt) {
+                    (true, false) => Some(PasteChord::Text),
+                    (false, true) => Some(PasteChord::Special),
+                    _ => c.paste_chord,
+                };
+            }
             _ => {}
         }
     }

@@ -1281,6 +1281,45 @@ fn my_caret_follows_a_remote_insert_before_it() {
     }
 }
 
+/// The text Ann has selected.
+fn selected_text(room: &Room) -> String {
+    let st = room.ann().session.active().unwrap();
+    let sel = st.selection.text.clone().unwrap();
+    let ((_, a), (_, b)) = sel.ordered();
+    let t = st.doc.slides[st.selection.slide].shape(sel.shape).unwrap().text.as_ref().unwrap().text();
+    t.chars().skip(a).take(b - a).collect()
+}
+
+/// DP1 (review m3): Ann has "alpha" selected; Bob types before it. Both ends of Ann's selection
+/// move with the text, so it still covers "alpha", and what Ann types replaces "alpha" on both
+/// pages.
+#[test]
+fn my_text_selection_follows_a_remote_insert_before_it() {
+    let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("text.edit", json!({"id": alpha.0, "at": [0, 1]})).unwrap();
+    room.h.state_mut().run("text.selectAll", json!({})).unwrap();
+    room.h.run_steps(1);
+    assert_eq!(selected_text(&room), "alpha");
+    let before = room.ann().session.active().unwrap().selection.text.clone().unwrap();
+    room.bob.run("slide.go", json!({"index": 1}));
+    room.bob.run("text.edit", json!({"id": alpha.0, "at": [0, 0]}));
+    room.bob.run("text.insert", json!({"text": "Bob "}));
+    room.settle();
+    let after = room.ann().session.active().unwrap().selection.text.clone().unwrap();
+    assert_eq!(after.anchor, (before.anchor.0, before.anchor.1 + 4), "the anchor moved");
+    assert_eq!(after.caret, (before.caret.0, before.caret.1 + 4), "the caret moved");
+    assert_eq!(selected_text(&room), "alpha", "the selection still covers alpha");
+    room.h.input_mut().events.push(egui::Event::Text("X".into()));
+    room.h.run_steps(1);
+    room.settle();
+    for (who, d) in [("Ann", room.ann_doc()), ("Bob", room.bob.doc())] {
+        let t = d.slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text();
+        assert_eq!(t, "Bob X", "{who}: Ann's typing replaced her selection");
+    }
+}
+
 /// DP1, as the browser test does it: a double-click into the text, a remote insert at its start
 /// while the double-click is still settling, then End and typing.
 #[test]
@@ -1310,7 +1349,13 @@ fn my_caret_follows_a_remote_insert_after_a_double_click() {
             room.settle();
         };
         if remote_before_end {
+            // Bob's "Bob " before Ann's caret (the harness's double-click leaves it collapsed, a
+            // range is `my_text_selection_follows_a_remote_insert_before_it`) moves both ends of
+            // her selection by 4 (review m3).
+            let before = room.ann().session.active().unwrap().selection.text.clone().unwrap();
             bob_types(&mut room);
+            let after = room.ann().session.active().unwrap().selection.text.clone().unwrap();
+            assert_eq!((after.anchor, after.caret), ((before.anchor.0, before.anchor.1 + 4), (before.caret.0, before.caret.1 + 4)));
             room.h.input_mut().events.push(end);
             room.h.run_steps(1);
         } else {
