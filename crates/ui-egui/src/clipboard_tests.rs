@@ -27,7 +27,8 @@ pub(crate) fn web_shortcut(h: &mut H, key: egui::Key, ev: Option<egui::Event>) -
 }
 
 /// Ctrl on Windows and Linux; on a Mac egui reports Cmd as `mac_cmd` and `command`.
-const CTRL: egui::Modifiers = egui::Modifiers { command: true, ctrl: !cfg!(target_os = "macos"), mac_cmd: cfg!(target_os = "macos"), ..egui::Modifiers::NONE };
+const CTRL: egui::Modifiers =
+    egui::Modifiers { command: true, ctrl: !cfg!(target_os = "macos"), mac_cmd: cfg!(target_os = "macos"), ..egui::Modifiers::NONE };
 
 /// The batch a browser gives for `key` with `mods` held: the key press, the DOM clipboard event
 /// `ev`, and the release. Returns the text the frame put on the system clipboard, if any.

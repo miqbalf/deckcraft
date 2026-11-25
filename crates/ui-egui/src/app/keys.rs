@@ -171,21 +171,7 @@ impl SlideApp {
                 egui::Event::Ime(ime) => self.ime_event(ctx, &ime),
                 egui::Event::Copy => self.publish_clipboard(ctx, false),
                 egui::Event::Cut => self.publish_clipboard(ctx, true),
-                // Paste Special's key (Ctrl+Alt+V) opened the dialog, which pastes once a format
-                // is picked; a browser's paste for the same keystroke is not a second paste.
-                egui::Event::Paste(_) if clip_events.paste_chord == Some(PasteChord::Special) => {}
-                // Paste and Match Formatting's key (Ctrl+Shift+V) was dropped for this event: it
-                // pastes the browser's text as text, once.
-                egui::Event::Paste(text) if clip_events.paste_chord == Some(PasteChord::Text) => {
-                    let params = if text.is_empty() || text == OBJECTS_MARKER { json!({}) } else { json!({"text": text}) };
-                    let revision = self.session.active().map(|d| d.revision);
-                    if let Err(e) = self.run_engine("edit.pasteText", &params) {
-                        self.set_status(e);
-                    }
-                    if self.session.active().map(|d| d.revision) != revision {
-                        self.note_application_edit(ctx);
-                    }
-                }
+                egui::Event::Paste(text) if clip_events.paste_chord.is_some() => self.chord_paste(ctx, clip_events.paste_chord, &text),
                 egui::Event::Paste(text) => {
                     // Our own marker for objects without text: paste what the session copied.
                     let text = if text == OBJECTS_MARKER { String::new() } else { text };
@@ -268,6 +254,27 @@ impl SlideApp {
         let data = deckcraft_engine::cmd::base64_encode(&png);
         if let Err(e) = self.run_engine("insert.picture", &json!({"name": "Pasted image.png", "data": data})) {
             self.set_status(e);
+        }
+    }
+
+    /// The browser's paste event for Ctrl+Shift+V or Ctrl+Alt+V, whose key came in the same batch.
+    fn chord_paste(&mut self, ctx: &egui::Context, chord: Option<PasteChord>, text: &str) {
+        match chord {
+            // Paste Special's key opened the dialog, which pastes once a format is picked; the
+            // browser's paste for the same keystroke is not a second paste.
+            Some(PasteChord::Special) | None => {}
+            // Paste and Match Formatting's key was dropped for this event: it pastes the
+            // browser's text as text, once.
+            Some(PasteChord::Text) => {
+                let params = if text.is_empty() || text == OBJECTS_MARKER { json!({}) } else { json!({"text": text}) };
+                let revision = self.session.active().map(|d| d.revision);
+                if let Err(e) = self.run_engine("edit.pasteText", &params) {
+                    self.set_status(e);
+                }
+                if self.session.active().map(|d| d.revision) != revision {
+                    self.note_application_edit(ctx);
+                }
+            }
         }
     }
 
