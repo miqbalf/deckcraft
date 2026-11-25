@@ -204,7 +204,10 @@ impl Room {
 
     pub fn check_rebuild(&self) {
         for (i, p) in self.peers.iter().enumerate() {
-            if p.live.holding() || p.live.replica().is_none() {
+            // A peer in the middle of a drag shows its own preview, which is shared only at the
+            // drop (Ruling D12); a trace that settles the room then (the checkpoint joiner, seed
+            // 7) would compare that preview with the replica.
+            if p.live.holding() || p.live.replica().is_none() || p.session.remote_busy(p.live.doc()) {
                 continue;
             }
             let shown = p.doc();
