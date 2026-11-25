@@ -102,6 +102,9 @@ pub const COPY_SAVED_TEXT: &str = "Your unmerged changes were saved as {name}.";
 /// Said when the page could not store a copy of unmerged edits: `{error}`.
 pub const COPY_FAILED_TEXT: &str = "Your unmerged changes could not be saved to Nextcloud: {error}. Use Save a copy to download them.";
 
+/// The strip's line while every waiting copy was kept because the offline buffer filled.
+pub const FULL_COPY_TEXT: &str = "Your changes waiting to be sent are in a copy, ready to save.";
+
 /// Every English key this module draws, for the translation report.
 pub const ENGLISH_KEYS: &[&str] = &[
     RESTORE_LABEL,
@@ -118,6 +121,7 @@ pub const ENGLISH_KEYS: &[&str] = &[
     NO_PLACE_TEXT,
     COPY_SAVED_TEXT,
     COPY_FAILED_TEXT,
+    FULL_COPY_TEXT,
 ];
 
 /// The translation lookup for an English key. DeckCraft has no translation catalogue yet, so this
@@ -519,6 +523,12 @@ impl SlideApp {
         if let Some(copy) = lu.pump(&mut self.session) {
             self.pending_unmerged.push(copy);
         }
+    }
+
+    /// Keeps a copy to save (red stub: `full` not used yet).
+    pub(crate) fn keep_copy(&mut self, copy: (String, Vec<u8>), full: bool) {
+        let _ = full;
+        self.pending_unmerged.push(copy);
     }
 
     /// Offers the oldest waiting copy; it is dropped from the list only once the host took it.

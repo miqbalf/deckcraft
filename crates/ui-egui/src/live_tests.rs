@@ -503,6 +503,26 @@ fn an_unmerged_copy_is_offered_and_saved() {
     assert!(room.h.query_by_label(deckcraft_live::UNMERGED_TEXT).is_none(), "the offer is gone");
 }
 
+/// DC1: a copy kept because the offline buffer filled is offered with its own line, not as
+/// changes that "could not be merged".
+#[test]
+fn a_full_buffer_copy_has_its_own_line_in_the_strip() {
+    let log = HostLog::default();
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, downloading(&log));
+    room.h.state_mut().keep_copy(copy(), true);
+    room.h.run_steps(2);
+    room.h.get_by_label(super::live::FULL_COPY_TEXT);
+    assert!(room.h.query_by_label(deckcraft_live::UNMERGED_TEXT).is_none(), "not told as unmerged");
+    // A copy the room could not merge waits too: the strip says the general line.
+    room.h.state_mut().keep_copy(("Deck (unmerged 2026-11-23 1405).pptx".to_owned(), deck(false)), false);
+    room.h.run_steps(2);
+    room.h.get_by_label(deckcraft_live::UNMERGED_TEXT);
+    room.h.get_by_role_and_label(Role::Button, super::live::SAVE_COPY_TEXT).click();
+    room.h.run_steps(2);
+    assert_eq!(log.got().len(), 1, "the oldest copy was saved");
+    room.h.get_by_label(deckcraft_live::UNMERGED_TEXT);
+}
+
 #[test]
 fn a_cancelled_save_keeps_the_copy() {
     let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, cancelling());

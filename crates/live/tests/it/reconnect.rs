@@ -215,7 +215,8 @@ fn a_full_offline_buffer_offers_a_copy_once_and_drops_nothing() {
     }
     assert!(!r.peers[0].live.editable(), "the buffer filled");
     r.pump_all();
-    let (_, bytes) = r.peers[0].live.take_unmerged().expect("a copy is offered once the buffer is full");
+    let (_, bytes, full) = r.peers[0].live.take_copy().expect("a copy is offered once the buffer is full");
+    assert!(full, "the copy is marked as the full buffer's, so the strip says so");
     assert!(copy_text(&bytes, a).matches(&chunk).count() >= taken.min(1), "the copy holds the waiting edits");
     let told = |r: &Room| r.peers[0].notices.iter().filter(|n| n.text == FULL_TEXT).count();
     assert_eq!(told(&r), 1, "told once: {:?}", r.peers[0].notices);

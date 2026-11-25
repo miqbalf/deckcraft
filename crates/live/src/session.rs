@@ -567,6 +567,12 @@ impl<H: Hub> DeckLive<H> {
     /// ([`UNMERGED_TEXT`]) says when one starts waiting: hosts call this after every pump.
     ///
     /// [`unmerged_name`]: crate::unmerged_name
+    /// [`DeckLive::take_unmerged`], and whether the copy was kept only because the offline buffer
+    /// filled (red stub: always false).
+    pub fn take_copy(&mut self) -> Option<(String, Vec<u8>, bool)> {
+        self.take_unmerged().map(|(n, b)| (n, b, false))
+    }
+
     pub fn take_unmerged(&mut self) -> Option<(String, Vec<u8>)> {
         let u = self.map.unmerged.take()?;
         let at = u.at.or_else(local_now).unwrap_or_default();
