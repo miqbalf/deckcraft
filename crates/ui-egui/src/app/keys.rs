@@ -273,6 +273,8 @@ impl SlideApp {
                 }
                 if self.session.active().map(|d| d.revision) != revision {
                     self.note_application_edit(ctx);
+                    // Shared now, as the key path shares each key's edit (DP1 review, DC1).
+                    self.flush_live();
                 }
             }
         }

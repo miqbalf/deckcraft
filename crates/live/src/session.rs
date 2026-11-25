@@ -32,7 +32,8 @@ pub const TOO_LARGE_TEXT: &str = "This presentation is too large to edit live. I
 /// Local edits the other editors never got were kept as a copy: the host saves it
 /// ([`DeckLive::take_unmerged`]).
 pub const UNMERGED_TEXT: &str = "Some of your changes could not be merged with the other editors. A copy with them is ready to save.";
-/// The offline buffer is full (C9's bound): a copy with the waiting edits is offered.
+/// The offline buffer is full (C9's bound, `craft_collab::OFFLINE_MAX_BYTES`): no more edits are
+/// taken until the waiting ones are sent, and a copy with them is offered meanwhile.
 pub const FULL_TEXT: &str = "Too many changes are waiting to be sent. A copy with them is ready to save; editing resumes once they are sent.";
 /// Why a Restore was not shared, when no more specific reason is known.
 pub const RESTORE_FAILED_TEXT: &str = "The deleted item could not be brought back. Try again.";
@@ -99,6 +100,8 @@ pub struct DeckLive<H: Hub> {
     clock: Arc<Mutex<Option<Clock>>>,
     pumps: f64,
     resync_told: bool,
+    /// The offline buffer filled and its copy was kept; cleared once edits are taken again.
+    full_kept: bool,
     /// The live presentation was closed here: the session is over.
     closed: bool,
     /// The person's local date and time, for the unmerged copy's name.
@@ -168,8 +171,16 @@ impl<H: Hub> DeckLive<H> {
             undo: crate::undo::UndoLog::default(),
             resync_after: false,
         };
-        let mut live =
-            DeckLive { core, map, clock: Arc::new(Mutex::new(default_clock())), pumps: 0.0, resync_told: false, closed: false, wall: None };
+        let mut live = DeckLive {
+            core,
+            map,
+            clock: Arc::new(Mutex::new(default_clock())),
+            pumps: 0.0,
+            resync_told: false,
+            full_kept: false,
+            closed: false,
+            wall: None,
+        };
         if live.clock.lock().unwrap_or_else(PoisonError::into_inner).is_some() {
             live.share_clock();
         }
@@ -276,6 +287,7 @@ impl<H: Hub> DeckLive<H> {
             self.core.end(craft_live::BROKEN);
         }
         self.tell_deletes();
+        self.keep_when_full();
         if let Some(u) = self.map.unmerged.as_mut()
             && u.at.is_none()
         {
@@ -284,6 +296,23 @@ impl<H: Hub> DeckLive<H> {
                 None => local_now().unwrap_or_else(|| epoch_ms(now)),
             });
         }
+    }
+
+    /// C9's bound (`craft_collab::OFFLINE_MAX_BYTES`, `MAX_UNCONFIRMED_EDITS`): once the offline
+    /// buffer is full no edit is taken, and a copy with every waiting edit is offered, once per
+    /// fill ([`FULL_TEXT`]). The edits themselves still go to the room when the link is back.
+    fn keep_when_full(&mut self) {
+        let full = self.core.live().buffer_full();
+        if !full {
+            self.full_kept = false;
+            return;
+        }
+        if self.full_kept {
+            return;
+        }
+        let Some(state) = self.core.live().doc().map(craft_collab::Replica::state) else { return };
+        self.full_kept = true;
+        self.map.keep_copy(state, FULL_TEXT);
     }
 
     /// The carets' scene: the engine's deck and the replica as they are now (L7).

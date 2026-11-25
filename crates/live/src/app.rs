@@ -116,11 +116,16 @@ impl Mapping {
     /// A copy still waiting is merged with it, never replaced: after a reset the replica no longer
     /// holds the earlier edits (L5 review I1). The person is told when a copy starts waiting.
     pub(crate) fn keep_unmerged(&mut self, state: Vec<u8>) {
+        self.keep_copy(state, UNMERGED_TEXT);
+    }
+
+    /// [`Mapping::keep_unmerged`], told with `text` when a copy starts waiting.
+    pub(crate) fn keep_copy(&mut self, state: Vec<u8>, text: &str) {
         match self.unmerged.as_mut() {
             Some(u) => u.states.push(state),
             None => {
                 self.unmerged = Some(Unmerged { states: vec![state], at: None });
-                self.notices.push(Notice { text: UNMERGED_TEXT.to_owned(), restore: None });
+                self.notices.push(Notice { text: text.to_owned(), restore: None });
             }
         }
     }

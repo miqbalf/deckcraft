@@ -51,12 +51,19 @@ impl Hub for BoxHub {
     fn set_space(&mut self, space: u32) {
         self.0.set_space(space);
     }
+    // Forwarded, or the default no-op would keep a wrapped hub's link (a `Handover`'s new one,
+    // a test relay's) open after the session closed it.
+    fn close(&mut self) {
+        self.0.close();
+    }
 }
 
-/// The hub a host hands in when it renews tickets (DC1, red: not wired yet).
+/// The hub a host hands in when it renews tickets: a renewed ticket ([`Hub::set_token`]) opens a
+/// second link with `open` and switches to it once it has joined, so the old ticket's expiry
+/// drops nothing (LP2's `craft_collab::Handover`). `open` connects to the same relay and room, as
+/// `hub` was connected.
 pub fn renewing<H: Hub + 'static>(hub: H, open: impl FnMut(&craft_collab::Reopen<'_>) -> craft_collab::Result<H> + 'static) -> BoxHub {
-    let _ = open;
-    BoxHub(Box::new(hub))
+    BoxHub(Box::new(craft_collab::Handover::new(hub, open)))
 }
 
 /// The live presentation as the window holds it.

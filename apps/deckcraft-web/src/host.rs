@@ -55,7 +55,9 @@
 //!   the fetch, the connect or the start fails, the window says why and the next `live` tries
 //!   again ([`crate::live_ticket::Joining`]).
 //! - A later `live` for the same room is the page's ticket refresh: it goes to the hub
-//!   (`Hub::set_token`). One for another room, or one that gives less access, ends the session.
+//!   (`Hub::set_token`), a `craft_collab::Handover` that opens a second link with it and switches
+//!   once that one has joined, so the old ticket's expiry drops nothing. One for another room, or
+//!   one that gives less access, ends the session.
 //! - `live-state` `{state, reason, savedAt, peers}` goes to the parent on every change of state
 //!   and at most once a second otherwise.
 //! - While live (and after a `live` message that failed), the presentation is not saved from this
@@ -78,7 +80,6 @@ use craft_web_host::Mode;
 use craft_web_host::live::{LiveMessage, LiveState, LiveStatus as HostStatus, Peer as HostPeer};
 use craft_web_host::web::{FileData, Host, Message, fetch_font};
 use deckcraft_live::{BaseFile, DeckLive, LiveFail};
-use deckcraft_ui_egui::live::BoxHub;
 use deckcraft_ui_egui::{HostAnswer, HostSaves, Services, SlideApp};
 use wasm_bindgen::{JsCast as _, JsValue};
 
@@ -470,8 +471,16 @@ impl Live {
             })
             .map_err(|e| (e, None))
             .and_then(|hub| {
+                // A renewed ticket opens a second link that takes over once it has joined, so the
+                // old ticket's expiry never drops the link (LP2, DC1). It is opened as this one
+                // was, with DeckCraft's schema, resuming where this link stands; `Handover` sets
+                // the kept id space on it.
+                let url = message.relay_url.clone();
+                let hub = deckcraft_ui_egui::live::renewing(hub, move |r: &craft_collab::Reopen<'_>| {
+                    craft_collab::web::WebHub::connect_as(&url, r.ticket, r.applied, Some(&deckcraft_live::schema()))
+                });
                 let base = BaseFile { bytes, name: &message.file_name, expected_sha256: Some(hash) };
-                DeckLive::start(BoxHub(Box::new(hub)), &message.room, &base, access, &uid, &mut app.session).map_err(|e| (fail_text(&e), Some(e)))
+                DeckLive::start(hub, &message.room, &base, access, &uid, &mut app.session).map_err(|e| (fail_text(&e), Some(e)))
             });
         match started {
             Ok(mut live) => {
