@@ -381,6 +381,8 @@ pub struct SlideApp {
     /// Copies of local edits the live room never got, waiting to be saved: (file name, `.pptx`).
     /// Kept until the host took one (a download, or a write that succeeded).
     pub(crate) pending_unmerged: Vec<(String, Vec<u8>)>,
+    /// The names of waiting copies a full offline buffer kept ([`live::FULL_COPY_TEXT`]).
+    pub(crate) full_copies: Vec<String>,
     /// Closing the window has offered the waiting copies once; a second close goes ahead.
     pub(crate) unmerged_close_offered: bool,
     /// Copies handed to the page that answers saves, by the id its answer will carry: kept until

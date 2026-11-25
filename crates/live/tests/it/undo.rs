@@ -411,8 +411,8 @@ fn undo_never_takes_away_another_editors_text() {
     r.settle();
     undo(&mut r, 0);
     r.settle();
-    for i in 0..2 {
-        assert!(shape_of(&r.peers[i].doc(), b).is_none(), "peer {i}: Ann's undo removed her box from view");
+    for (i, peer) in r.peers.iter().enumerate() {
+        assert!(shape_of(&peer.doc(), b).is_none(), "peer {i}: Ann's undo removed her box from view");
     }
     let replica = r.peers[1].live.replica().expect("replica");
     let kept = replica.text(deckcraft_live::TextTarget::Shape(b)).map(|ps| ps.iter().map(|p| p.text()).collect::<String>()).unwrap_or_default();
@@ -421,8 +421,8 @@ fn undo_never_takes_away_another_editors_text() {
     let p = &mut r.peers[1];
     p.live.restore(&mut p.session, Tomb::Shape(b)).expect("restore");
     r.settle();
-    for i in 0..2 {
-        let t = shape_of(&r.peers[i].doc(), b).and_then(|s| s.text.map(|t| t.text())).unwrap_or_default();
+    for (i, peer) in r.peers.iter().enumerate() {
+        let t = shape_of(&peer.doc(), b).and_then(|s| s.text.map(|t| t.text())).unwrap_or_default();
         assert!(t.contains("Bob"), "peer {i}: Bob's text is back: {t:?}");
     }
     r.assert_converged();

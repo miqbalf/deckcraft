@@ -15,7 +15,7 @@ use crate::local::plan;
 use crate::net::unshared;
 use crate::presence::{Mine, Scene};
 use crate::remote::{Targets, land, whole};
-use crate::session::{Notice, UNMERGED_TEXT};
+use crate::session::{FULL_TEXT, Notice, UNMERGED_TEXT};
 use crate::split::{PlannedWrite, plan_split};
 use crate::tomb::{Tombs, inside, line_for, restore_writes, slide_of, slide_tomb, tomb_over, tombstoned};
 use crate::undo::{AFTER_UNDO_TEXT, Group, UNDO_SKIPPED_TEXT, UndoLog};
@@ -116,15 +116,20 @@ impl Mapping {
     /// A copy still waiting is merged with it, never replaced: after a reset the replica no longer
     /// holds the earlier edits (L5 review I1). The person is told when a copy starts waiting.
     pub(crate) fn keep_unmerged(&mut self, state: Vec<u8>) {
-        self.keep_copy(state, UNMERGED_TEXT);
+        self.keep_copy(state, false);
     }
 
-    /// [`Mapping::keep_unmerged`], told with `text` when a copy starts waiting.
-    pub(crate) fn keep_copy(&mut self, state: Vec<u8>, text: &str) {
+    /// [`Mapping::keep_unmerged`]; `full` when the state is kept because the offline buffer filled
+    /// (told with [`FULL_TEXT`] when a copy starts waiting, else [`UNMERGED_TEXT`]).
+    pub(crate) fn keep_copy(&mut self, state: Vec<u8>, full: bool) {
         match self.unmerged.as_mut() {
-            Some(u) => u.states.push(state),
+            Some(u) => {
+                u.states.push(state);
+                u.full &= full;
+            }
             None => {
-                self.unmerged = Some(Unmerged { states: vec![state], at: None });
+                self.unmerged = Some(Unmerged { states: vec![state], at: None, full });
+                let text = if full { FULL_TEXT } else { UNMERGED_TEXT };
                 self.notices.push(Notice { text: text.to_owned(), restore: None });
             }
         }

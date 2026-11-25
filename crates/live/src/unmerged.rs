@@ -25,6 +25,9 @@ pub(crate) struct Unmerged {
     pub states: Vec<Vec<u8>>,
     /// When it was handed over (stamped after the pump, on the wall clock).
     pub at: Option<NaiveDateTime>,
+    /// Every state in it was kept because the offline buffer filled (none after a reset or a
+    /// replica given up): the copy is offered as waiting edits, not as unmerged ones.
+    pub full: bool,
 }
 
 /// The `.pptx` bytes of `base` + every state in `states` (yrs updates of one document, so their

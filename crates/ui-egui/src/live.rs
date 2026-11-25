@@ -263,9 +263,10 @@ impl LiveUi {
     }
 
     /// One frame: share and take in edits, then tell the room where the selection is when it moved.
-    /// Returns a copy of local edits the room could not merge, when one was handed over.
+    /// Returns a copy of local edits the room could not merge, when one was handed over, and
+    /// whether it holds only edits a full offline buffer kept.
     #[must_use]
-    pub fn pump(&mut self, session: &mut Session) -> Option<(String, Vec<u8>)> {
+    pub fn pump(&mut self, session: &mut Session) -> Option<((String, Vec<u8>), bool)> {
         self.peers = self.live.pump(session);
         let ids: Vec<String> = self.peers.iter().map(|p| p.id.clone()).collect();
         self.colours = ids.iter().cloned().zip(colours_for(&ids)).collect();
@@ -273,7 +274,7 @@ impl LiveUi {
         self.moved.retain(|id, _| ids.contains(id));
         self.take_notices();
         // Taken after every pump: each hand-over since the last take is in the newest copy.
-        let copy = self.live.take_unmerged();
+        let copy = self.live.take_copy().map(|(name, bytes, full)| ((name, bytes), full));
         let key = session.documents().iter().find(|d| d.uid == self.live.doc()).map(|st| {
             let sel = &st.selection;
             (sel.slide, sel.shapes.clone(), sel.text.as_ref().map(|t| (t.shape, t.anchor, t.caret, t.notes)))
@@ -509,8 +510,8 @@ impl SlideApp {
             self.offer_unmerged();
             return;
         }
-        if let Some(copy) = lu.pump(&mut self.session) {
-            self.pending_unmerged.push(copy);
+        if let Some((copy, full)) = lu.pump(&mut self.session) {
+            self.keep_copy(copy, full);
         }
         // Edits and carets from the room arrive without input: keep frames coming.
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -520,14 +521,20 @@ impl SlideApp {
     /// run through [`SlideApp::run_live`] is).
     pub(crate) fn flush_live(&mut self) {
         let Some(lu) = self.live.as_mut().filter(|l| l.applies(&self.session)) else { return };
-        if let Some(copy) = lu.pump(&mut self.session) {
-            self.pending_unmerged.push(copy);
+        if let Some((copy, full)) = lu.pump(&mut self.session) {
+            self.keep_copy(copy, full);
         }
     }
 
-    /// Keeps a copy to save (red stub: `full` not used yet).
+    /// Keeps a copy to save; `full` when it holds only edits a full offline buffer kept
+    /// ([`FULL_COPY_TEXT`]), so the strip can say so.
     pub(crate) fn keep_copy(&mut self, copy: (String, Vec<u8>), full: bool) {
-        let _ = full;
+        self.full_copies.retain(|n| self.pending_unmerged.iter().any(|(m, _)| m == n));
+        if full {
+            self.full_copies.push(copy.0.clone());
+        } else {
+            self.full_copies.retain(|n| *n != copy.0);
+        }
         self.pending_unmerged.push(copy);
     }
 
@@ -710,6 +717,9 @@ pub(crate) fn status_strip(app: &mut SlideApp, ui: &mut Ui) {
         return;
     }
     let copy_waiting = !app.pending_unmerged.is_empty();
+    // Only copies a full offline buffer kept: they wait to be sent, nothing failed to merge.
+    let copy_line =
+        if app.pending_unmerged.iter().all(|(n, _)| app.full_copies.contains(n)) { FULL_COPY_TEXT } else { deckcraft_live::UNMERGED_TEXT };
     let lu = app.live.as_ref().filter(|l| app.backstage.is_none() && l.applies(&app.session));
     let t = Tokens::get(ui.ctx());
     let status = lu.map(LiveUi::status_line);
@@ -729,7 +739,7 @@ pub(crate) fn status_strip(app: &mut SlideApp, ui: &mut Ui) {
                 }
                 if copy_waiting {
                     ui.add_space(16.0);
-                    let text = tr(deckcraft_live::UNMERGED_TEXT);
+                    let text = tr(copy_line);
                     let l = ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(t.accent)));
                     l.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
                     if ui.button(tr(SAVE_COPY_TEXT)).clicked() {

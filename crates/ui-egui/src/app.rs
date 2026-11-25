@@ -125,6 +125,7 @@ impl SlideApp {
             ime_reset: HashMap::new(),
             live,
             pending_unmerged: Vec::new(),
+            full_copies: Vec::new(),
             unmerged_close_offered: false,
             copies_sent: Vec::new(),
             page_refused_copy: false,
