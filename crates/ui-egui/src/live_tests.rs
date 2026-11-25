@@ -1374,3 +1374,27 @@ fn my_caret_follows_a_remote_insert_after_a_double_click() {
         }
     }
 }
+
+/// DP1 fix 1 (review I2): a slide with an animation is not copied live (Ruling D15). A browser's
+/// Ctrl+C, Ctrl+V on it pastes nothing on either page and says why, as the menu's Paste does.
+#[test]
+fn web_paste_of_an_animated_slide_is_refused_with_the_reason() {
+    let mut s = Session::with_new();
+    s.execute("slide.new", &json!({"layout": "blank"})).unwrap();
+    let id = s.execute("shape.insert", &json!({"preset": "rect", "rect": [60.0, 60.0, 200.0, 80.0], "text": "alpha"})).unwrap()["id"].clone();
+    s.execute("animation.add", &json!({"effect": "fade", "class": "entrance", "start": "onClick", "ids": [id]})).unwrap();
+    s.execute("slide.go", &json!({"index": 0})).unwrap();
+    let bytes = deckcraft_engine::cmd::file::save_bytes(&s.active().unwrap().doc, "pptx").unwrap();
+    let mut room = Room::editors(&bytes);
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("slide.selectRange", json!({"to": 1, "from": 1})).unwrap();
+    room.h.run_steps(1);
+    let n = room.ann_doc().slides.len();
+    let clip = crate::clipboard_tests::web_shortcut(&mut room.h, egui::Key::C, Some(egui::Event::Copy)).unwrap_or_default();
+    crate::clipboard_tests::web_shortcut(&mut room.h, egui::Key::V, Some(egui::Event::Paste(clip)));
+    room.settle();
+    assert_eq!(room.ann_doc().slides.len(), n, "Ann: nothing pasted");
+    assert_eq!(room.bob.doc().slides.len(), n, "Bob: nothing pasted");
+    let status = room.ann().status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+    assert!(status.contains("can't be copied while editing live"), "Ann is told why: {status:?}");
+}
