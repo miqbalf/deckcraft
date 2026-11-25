@@ -4,7 +4,7 @@
 
 use chrono::NaiveDateTime;
 use craft_live::LiveStatus;
-use deckcraft_live::{Tomb, UNMERGED_TEXT, unmerged_name};
+use deckcraft_live::{FULL_TEXT, Tomb, UNMERGED_TEXT, unmerged_name};
 use deckcraft_model::ShapeId;
 use serde_json::json;
 
@@ -192,6 +192,43 @@ fn a_full_offline_buffer_says_so() {
     let refused = p.live.restore(&mut p.session, Tomb::Shape(g)).expect_err("restore waits too");
     assert_eq!(refused, craft_live::BUFFER_FULL);
     assert!(p.live.replica().is_some_and(|d| d.shape(g).is_some_and(|e| e.del)), "nothing was written");
+}
+
+/// DC1 (C9's 1 MiB bound, with the copy WordCraft offers): once the offline buffer is full, a copy
+/// with every waiting edit is offered once, told with [`FULL_TEXT`] (not [`UNMERGED_TEXT`]); the
+/// edits still go to the room when the link is back, and editing resumes.
+#[test]
+fn a_full_offline_buffer_offers_a_copy_once_and_drops_nothing() {
+    let mut r = Room::new(basic(), 2, 19);
+    let a = find(&r.peers[0].doc(), "alpha");
+    r.drop_link(0);
+    r.pump_all();
+    r.peers[0].run("text.edit", json!({"id": a.0})).expect("edit offline");
+    let chunk = "y".repeat(200_000);
+    let mut taken = 0;
+    for _ in 0..12 {
+        if !r.peers[0].live.editable() {
+            break;
+        }
+        r.peers[0].run("text.insert", json!({"text": chunk})).expect("type offline");
+        taken += 1;
+    }
+    assert!(!r.peers[0].live.editable(), "the buffer filled");
+    r.pump_all();
+    let (_, bytes) = r.peers[0].live.take_unmerged().expect("a copy is offered once the buffer is full");
+    assert!(copy_text(&bytes, a).matches(&chunk).count() >= taken.min(1), "the copy holds the waiting edits");
+    let told = |r: &Room| r.peers[0].notices.iter().filter(|n| n.text == FULL_TEXT).count();
+    assert_eq!(told(&r), 1, "told once: {:?}", r.peers[0].notices);
+    assert!(r.peers[0].notices.iter().all(|n| n.text != UNMERGED_TEXT), "not told as a copy that could not be merged");
+    r.pump_all();
+    assert!(r.peers[0].live.take_unmerged().is_none(), "not offered again while still full");
+    r.restore_link(0);
+    r.settle();
+    assert!(r.peers[0].live.editable(), "editing resumes once they are sent");
+    let at_b = shape_of(&r.peers[1].doc(), a).and_then(|s| s.text).map(|t| t.text()).unwrap_or_default();
+    assert_eq!(at_b.matches(&chunk).count(), taken, "every taken edit reached the other editor");
+    assert_eq!(told(&r), 1);
+    r.assert_converged();
 }
 
 /// Stopping the session while edits wait for the link: stop hands back the copy.

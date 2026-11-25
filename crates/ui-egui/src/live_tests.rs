@@ -429,6 +429,9 @@ impl craft_collab::Hub for Watched {
     fn set_space(&mut self, space: u32) {
         self.0.set_space(space);
     }
+    fn close(&mut self) {
+        self.0.close();
+    }
 }
 
 impl Drop for Watched {
@@ -1397,4 +1400,98 @@ fn web_paste_of_an_animated_slide_is_refused_with_the_reason() {
     assert_eq!(room.bob.doc().slides.len(), n, "Bob: nothing pasted");
     let status = room.ann().status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
     assert!(status.contains("can't be copied while editing live"), "Ann is told why: {status:?}");
+}
+
+/// DC1 (LP2's switch on DeckCraft): Ann's hub is the web host's, [`super::live::renewing`]. A
+/// renewed ticket opens a second link; once it has joined Ann is on it, and the old ticket's
+/// expiry (its link dropped by the relay) costs nothing: what Ann typed before, during and after
+/// the switch reaches Bob in order, Ann stays Live the whole time, and Bob sees one Ann.
+#[test]
+fn a_renewed_ticket_switches_links_with_no_drop_and_no_lost_typing() {
+    let bytes = deck(false);
+    let relay = MemRelay::new();
+    let clock = Arc::new(AtomicU64::new(0));
+    let base = BaseFile { bytes: &bytes, name: NAME, expected_sha256: None };
+    let first = relay.connect("ann", "Ann", true);
+    let opened = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let (r2, o2) = (relay.clone(), opened.clone());
+    let hub = super::live::renewing(first.clone(), move |r: &craft_collab::Reopen<'_>| {
+        o2.lock().unwrap().push(r.ticket.to_owned());
+        Ok(r2.connect("ann", "Ann", true))
+    });
+    let mut session = Session::new();
+    let mut live = DeckLive::start(hub, ROOM, &base, Access::Edit, "ann", &mut session).unwrap();
+    let c = clock.clone();
+    live.set_clock(Box::new(move || c.load(Ordering::Relaxed) as f64));
+    let app = SlideApp::new(session, Services { live: Some(live), ..Default::default() });
+    let h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_ui_state(
+        |ui, app: &mut SlideApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        app,
+    );
+    let hub = relay.connect("bob", "Bob", true);
+    let mut session = Session::new();
+    let mut live = DeckLive::start(hub, ROOM, &base, Access::Edit, "bob", &mut session).unwrap();
+    let c = clock.clone();
+    live.set_clock(Box::new(move || c.load(Ordering::Relaxed) as f64));
+    let mut room = Room { relay: relay.clone(), ann_hub: first.clone(), h, bob: Bob { live, session }, clock };
+    room.settle();
+
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("text.edit", json!({"id": alpha.0, "at": [0, 5]})).unwrap();
+    room.h.run_steps(1);
+    let live_now = |room: &Room| matches!(room.ann().live.as_ref().unwrap().live().status(), craft_live::LiveStatus::Live { .. });
+    let typed = |room: &mut Room, t: &str| {
+        room.h.input_mut().events.push(egui::Event::Text(t.into()));
+        room.h.run_steps(1);
+    };
+    typed(&mut room, "1");
+    room.settle();
+    // The page's ticket refresh, as the host hands it in.
+    use craft_collab::Hub as _;
+    room.h.state_mut().live.as_mut().unwrap().live_mut().core_mut().hub_mut().set_token("renewed".into());
+    typed(&mut room, "2");
+    assert!(live_now(&room), "Live while the new link joins");
+    room.settle();
+    assert_eq!(*opened.lock().unwrap(), vec!["renewed".to_owned()], "one new link, opened with the renewed ticket");
+    typed(&mut room, "3");
+    // The old ticket expires: the relay drops the first link.
+    room.relay.drop_link(&first);
+    for _ in 0..3 {
+        typed(&mut room, "4");
+        assert!(live_now(&room), "Live across the old ticket's expiry");
+        room.settle();
+    }
+    let at_bob = room.bob.doc().slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text();
+    assert_eq!(at_bob, "alpha123444", "every keystroke reached Bob, in order");
+    let peers = room.bob.live.pump(&mut room.bob.session);
+    assert_eq!(peers.iter().filter(|p| craft_live::uid_of(&p.id) == "ann").count(), 1, "Bob sees one Ann: {peers:?}");
+    let ann = room.ann_doc().slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text();
+    assert_eq!(ann, at_bob, "both pages agree");
+}
+
+/// DP1 parked item (DC1): Ctrl+Shift+V's paste is shared at once, as its key was before DP1
+/// moved it onto the browser's paste event (`chord_paste` flushes like the key path). In one
+/// batch with typing after it, the paste goes out as its own update ahead of the typing: the
+/// relay orders two ops, where one unflushed frame sends one.
+#[test]
+fn a_web_ctrl_shift_v_paste_is_shared_before_the_typing_after_it() {
+    let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
+    room.h.state_mut().run("slide.go", json!({"index": 1})).unwrap();
+    room.h.state_mut().run("text.edit", json!({"id": alpha.0, "at": [0, 5]})).unwrap();
+    room.settle();
+    let chord =
+        egui::Modifiers { command: true, ctrl: !cfg!(target_os = "macos"), mac_cmd: cfg!(target_os = "macos"), shift: true, ..Default::default() };
+    let key = |pressed| egui::Event::Key { key: egui::Key::V, physical_key: None, pressed, repeat: false, modifiers: chord };
+    let before = room.relay.seq();
+    room.h.input_mut().events.extend([key(true), egui::Event::Paste("P".into()), key(false), egui::Event::Text("t".into())]);
+    room.h.run_steps(1);
+    room.settle();
+    let t = room.bob.doc().slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text();
+    assert_eq!(t, "alphaPt", "the paste and the typing reached Bob once each");
+    assert_eq!(room.relay.seq() - before, 2, "the paste was shared on its own, before the typing");
 }

@@ -392,3 +392,38 @@ fn a_taken_back_edit_takes_my_undo_steps_with_it() {
     assert!(fill_of(&r, 0, a) == fill0 && fill_of(&r, 1, a) == fill0, "the refused fill is gone everywhere");
     r.assert_converged();
 }
+
+/// DC1 (LP1's guard, DeckCraft's form): an Undo never takes away another editor's text. Ann adds
+/// a box, Bob types in it, Ann undoes the box: it becomes a tombstone that still holds Bob's
+/// text (Ruling D8), Bob is told who removed it and offered Restore, and Restore brings his text
+/// back on both pages. Text undo takes back only Ann's own characters (`undo_reverts_only_my_text`).
+#[test]
+fn undo_never_takes_away_another_editors_text() {
+    let mut r = Room::new(basic(), 2, 3);
+    let before: Vec<ShapeId> = r.peers[0].doc().slides[0].shapes.iter().map(|s| s.id).collect();
+    r.peers[0].run("shape.insert", json!({"preset": "rect", "rect": [400.0, 300.0, 200.0, 80.0], "text": "Ann"})).expect("insert");
+    r.peers[0].run("text.exit", json!({})).ok();
+    r.settle();
+    let b = r.peers[1].doc().slides[0].shapes.iter().map(|s| s.id).find(|id| !before.contains(id)).expect("Bob sees Ann's box");
+    r.peers[1].run("text.edit", json!({"id": b.0})).expect("edit");
+    r.peers[1].run("text.insert", json!({"text": "Bob "})).expect("type");
+    r.peers[1].run("text.exit", json!({})).ok();
+    r.settle();
+    undo(&mut r, 0);
+    r.settle();
+    for i in 0..2 {
+        assert!(shape_of(&r.peers[i].doc(), b).is_none(), "peer {i}: Ann's undo removed her box from view");
+    }
+    let replica = r.peers[1].live.replica().expect("replica");
+    let kept = replica.text(deckcraft_live::TextTarget::Shape(b)).map(|ps| ps.iter().map(|p| p.text()).collect::<String>()).unwrap_or_default();
+    assert!(kept.contains("Bob"), "the tombstone still holds Bob's text: {kept:?}");
+    assert!(r.peers[1].notices.iter().any(|n| n.restore == Some(Tomb::Shape(b))), "Bob is offered Restore: {:?}", r.peers[1].notices);
+    let p = &mut r.peers[1];
+    p.live.restore(&mut p.session, Tomb::Shape(b)).expect("restore");
+    r.settle();
+    for i in 0..2 {
+        let t = shape_of(&r.peers[i].doc(), b).and_then(|s| s.text.map(|t| t.text())).unwrap_or_default();
+        assert!(t.contains("Bob"), "peer {i}: Bob's text is back: {t:?}");
+    }
+    r.assert_converged();
+}

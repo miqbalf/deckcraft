@@ -53,6 +53,12 @@ impl Hub for BoxHub {
     }
 }
 
+/// The hub a host hands in when it renews tickets (DC1, red: not wired yet).
+pub fn renewing<H: Hub + 'static>(hub: H, open: impl FnMut(&craft_collab::Reopen<'_>) -> craft_collab::Result<H> + 'static) -> BoxHub {
+    let _ = open;
+    BoxHub(Box::new(hub))
+}
+
 /// The live presentation as the window holds it.
 pub type LiveDeck = DeckLive<BoxHub>;
 

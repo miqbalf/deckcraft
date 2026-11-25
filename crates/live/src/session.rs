@@ -32,6 +32,8 @@ pub const TOO_LARGE_TEXT: &str = "This presentation is too large to edit live. I
 /// Local edits the other editors never got were kept as a copy: the host saves it
 /// ([`DeckLive::take_unmerged`]).
 pub const UNMERGED_TEXT: &str = "Some of your changes could not be merged with the other editors. A copy with them is ready to save.";
+/// The offline buffer is full (C9's bound): a copy with the waiting edits is offered.
+pub const FULL_TEXT: &str = "Too many changes are waiting to be sent. A copy with them is ready to save; editing resumes once they are sent.";
 /// Why a Restore was not shared, when no more specific reason is known.
 pub const RESTORE_FAILED_TEXT: &str = "The deleted item could not be brought back. Try again.";
 /// Why a shared command is not taken now: the link is not live, or the ticket is read-only.

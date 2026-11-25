@@ -9,12 +9,16 @@ use super::*;
 type H = egui_kittest::Harness<'static, SlideApp>;
 
 fn app() -> H {
+    app_with(Services::default())
+}
+
+fn app_with(services: Services) -> H {
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
         |ui, app: &mut SlideApp| {
             app.logic(ui.ctx());
             app.ui(ui);
         },
-        SlideApp::new(Session::with_new(), Services::default()),
+        SlideApp::new(Session::with_new(), services),
     );
     h.run_steps(2);
     h
@@ -195,16 +199,41 @@ fn shape_text(h: &H, id: u64) -> String {
     h.state().session.active().unwrap().shape(deckcraft_model::ShapeId(id as u32)).unwrap().text.as_ref().unwrap().text()
 }
 
+/// Whether the run holding `word` in shape `id` is bold.
+fn bold_at(h: &H, id: u64, word: &str) -> bool {
+    let st = h.state().session.active().unwrap();
+    let body = st.shape(deckcraft_model::ShapeId(id as u32)).unwrap().text.clone().unwrap();
+    body.paragraphs.iter().flat_map(|p| p.runs.iter()).filter(|r| r.text.contains(word)).any(|r| r.props.bold == Some(true))
+}
+
+/// The system clipboard holds "Other" in bold (its HTML).
+fn bold_clipboard() -> Services {
+    Services { clipboard_html: Some(Box::new(|| Some("<p><b>Other</b></p>".into()))), ..Default::default() }
+}
+
 /// DP1 fix 1 (I1): a browser sends Ctrl+Shift+V (Paste and Match Formatting) as the key and a DOM
-/// paste with the system clipboard's text. It pastes that text once, as text, in one Undo step.
+/// paste with the system clipboard's text. It pastes that text once, as text (the clipboard's
+/// bold is not kept, DC1), in one Undo step.
 #[test]
 fn web_ctrl_shift_v_pastes_the_clipboard_text_once_as_text() {
-    let mut h = app();
+    let mut h = app_with(bold_clipboard());
     let id = ship_with_caret_at_end(&mut h);
     let chord = egui::Modifiers { shift: true, ..CTRL };
     web_chord(&mut h, egui::Key::V, chord, Some(egui::Event::Paste("Other".into())));
     assert_eq!(shape_text(&h, id), "ShipOther", "the browser's text, pasted once");
+    assert!(!bold_at(&h, id, "Other"), "pasted as text: the clipboard's bold is not kept");
     one_undo_step(&mut h, |h| shape_text(h, id) == "Ship", "the paste");
+}
+
+/// The contrast: a plain Ctrl+V with the same clipboard keeps its bold, so the check above can
+/// tell the two apart.
+#[test]
+fn web_ctrl_v_keeps_the_clipboard_formatting() {
+    let mut h = app_with(bold_clipboard());
+    let id = ship_with_caret_at_end(&mut h);
+    web_chord(&mut h, egui::Key::V, CTRL, Some(egui::Event::Paste("Other".into())));
+    assert_eq!(shape_text(&h, id), "ShipOther");
+    assert!(bold_at(&h, id, "Other"), "a plain paste keeps the HTML's bold");
 }
 
 /// On the desktop Ctrl+Shift+V arrives as the key only: it pastes the copied text as text.
