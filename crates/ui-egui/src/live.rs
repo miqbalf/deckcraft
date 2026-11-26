@@ -380,6 +380,9 @@ impl SlideApp {
         }
         if let Some(i) = self.session.documents().iter().position(|d| d.uid == doc) {
             self.session.set_active(i);
+            // The host's live start opened the page's file (not `open_from_host`): it is the
+            // page's, so Share asks the page for it (SH2).
+            self.host_file = self.session.documents().get(i).map(|d| (d.uid, d.path.clone()));
         }
     }
 
