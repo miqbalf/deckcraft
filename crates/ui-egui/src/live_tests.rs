@@ -1081,6 +1081,32 @@ fn a_live_start_takes_the_place_of_the_hosts_empty_presentation() {
     assert_eq!(app.session.active().map(|d| d.uid), Some(doc), "the live presentation is shown");
 }
 
+/// SH2: on the web the page's file opens live (the live start opens the room's presentation, not
+/// the page's own open), and Share must still ask the page for it.
+#[test]
+fn share_asks_the_page_for_the_live_presentation_it_joined() {
+    let bytes = deck(false);
+    let relay = MemRelay::new();
+    let asked = Arc::new(AtomicU64::new(0));
+    let counter = asked.clone();
+    let services = Services {
+        host_share: Some(Box::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    services.host_shares.set();
+    let mut app = SlideApp::new(Session::new(), services);
+    app.start_for_host().unwrap();
+    let base = BaseFile { bytes: &bytes, name: NAME, expected_sha256: None };
+    let live = DeckLive::start(BoxHub(Box::new(relay.connect("ann", "Ann", true))), ROOM, &base, Access::Edit, "ann", &mut app.session).unwrap();
+    app.start_live(live);
+    let r = app.run("file.share", json!({})).unwrap();
+    assert_eq!(asked.load(Ordering::Relaxed), 1, "{r}: the page is asked to share the live presentation it joined");
+    assert!(app.toast.is_none(), "no \"No Nextcloud connected\" for the page's own live file");
+}
+
 /// A viewer's armed Format Painter does not apply on a click (F7): refused up front, with why.
 #[test]
 fn a_viewers_format_painter_is_refused() {
