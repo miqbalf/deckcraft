@@ -210,8 +210,7 @@ pub const RENEW_ASK_MS: f64 = 20_000.0;
 /// asked (page ms), `None` before the first time.
 #[must_use]
 pub fn renew_ask_due(now: f64, last: Option<f64>) -> bool {
-    let _ = (now, last);
-    false
+    last.is_none_or(|at| now - at >= RENEW_ASK_MS || now < at)
 }
 
 /// Whether `name` is the presentation itself rather than an export (a PDF, a picture, an outline).
