@@ -413,8 +413,6 @@ pub struct Live {
     reported: Option<Reported>,
     /// The newest save marker seen, and when this window saw it (page milliseconds).
     saved: Option<(String, f64)>,
-    /// When this window last asked the page to renew its ticket (`live-renew`, page ms).
-    renew_asked: Option<f64>,
 }
 
 struct Reported {
@@ -461,31 +459,6 @@ impl Live {
     pub fn after(&mut self, app: &mut SlideApp, bridge: &Bridge) {
         app.hand_over_copies();
         self.report(app, bridge);
-        self.ask_renewal(app);
-    }
-
-    /// While live, ask the page every [`RENEW_ASK_MS`](crate::live_ticket::RENEW_ASK_MS) to
-    /// renew the ticket if it is due (`{type:"live-renew"}`). The page renews from a timer, which
-    /// runs minutes late while this window keeps the main thread busy; these frames still run, and
-    /// a renewed ticket arrives as a `live` message (DC1). The page ignores the ask otherwise.
-    fn ask_renewal(&mut self, app: &SlideApp) {
-        if app.live.is_none() {
-            self.renew_asked = None;
-            return;
-        }
-        let now = js_sys::Date::now();
-        if !crate::live_ticket::renew_ask_due(now, self.renew_asked) {
-            return;
-        }
-        self.renew_asked = Some(now);
-        let Some(window) = web_sys::window() else { return };
-        let (Ok(Some(parent)), Ok(origin)) = (window.parent(), window.location().origin()) else { return };
-        let ask = js_sys::Object::new();
-        if js_sys::Reflect::set(&ask, &JsValue::from_str("type"), &JsValue::from_str("live-renew")).is_ok()
-            && let Err(e) = parent.post_message(&ask, &origin)
-        {
-            log::warn!("live-renew not delivered: {e:?}");
-        }
     }
 
     fn open(&mut self, app: &mut SlideApp, bridge: &Bridge, message: &LiveMessage, bytes: &[u8], hash: [u8; 32]) {
