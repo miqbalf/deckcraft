@@ -34,7 +34,8 @@ pub const TOO_LARGE_TEXT: &str = "This presentation is too large to edit live. I
 pub const UNMERGED_TEXT: &str = "Some of your changes could not be merged with the other editors. A copy with them is ready to save.";
 /// The offline buffer is full (C9's bound, `craft_collab::OFFLINE_MAX_BYTES`): no more edits are
 /// taken until the connection is back, and a copy with them is offered meanwhile.
-pub const FULL_TEXT: &str = "Too many changes are waiting to be sent. A copy with them is ready to save; editing resumes once the connection is back.";
+pub const FULL_TEXT: &str =
+    "Too many changes are waiting to be sent. A copy with them is ready to save; editing resumes once the connection is back.";
 /// Why a Restore was not shared, when no more specific reason is known.
 pub const RESTORE_FAILED_TEXT: &str = "The deleted item could not be brought back. Try again.";
 /// Why a shared command is not taken now: the link is not live, or the ticket is read-only.
@@ -650,7 +651,7 @@ impl<H: Hub> DeckLive<H> {
 
     /// Ends the session: the observer and the undo hook come off, the engine's history is cleared
     /// (its snapshots predate the peers' changes) and the id block is dropped, so the
-    /// presentation is an ordinary one again. Returns the unmerged copy ([`DeckLive::take_unmerged`])
+    /// presentation is an ordinary one again, and the link to the room is closed. Returns the unmerged copy ([`DeckLive::take_unmerged`])
     /// when local edits never reached the room: the host saves it, as for any other copy.
     #[must_use = "the unmerged copy holds edits the other editors never got"]
     pub fn stop(mut self, session: &mut Session) -> Option<(String, Vec<u8>)> {
@@ -660,6 +661,9 @@ impl<H: Hub> DeckLive<H> {
             self.keep_unconfirmed();
         }
         self.detach(session);
+        // The link leaves for good now, so the room is told at once; a hub without a `Drop`
+        // that closes it (a native or test hub, both links of a `Handover`) would stay.
+        self.core.hub_mut().close();
         self.take_unmerged()
     }
 
