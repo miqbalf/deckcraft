@@ -33,8 +33,8 @@ pub const TOO_LARGE_TEXT: &str = "This presentation is too large to edit live. I
 /// ([`DeckLive::take_unmerged`]).
 pub const UNMERGED_TEXT: &str = "Some of your changes could not be merged with the other editors. A copy with them is ready to save.";
 /// The offline buffer is full (C9's bound, `craft_collab::OFFLINE_MAX_BYTES`): no more edits are
-/// taken until the waiting ones are sent, and a copy with them is offered meanwhile.
-pub const FULL_TEXT: &str = "Too many changes are waiting to be sent. A copy with them is ready to save; editing resumes once they are sent.";
+/// taken until the connection is back, and a copy with them is offered meanwhile.
+pub const FULL_TEXT: &str = "Too many changes are waiting to be sent. A copy with them is ready to save; editing resumes once the connection is back.";
 /// Why a Restore was not shared, when no more specific reason is known.
 pub const RESTORE_FAILED_TEXT: &str = "The deleted item could not be brought back. Try again.";
 /// Why a shared command is not taken now: the link is not live, or the ticket is read-only.
@@ -561,12 +561,6 @@ impl<H: Hub> DeckLive<H> {
         Ok(())
     }
 
-    /// The `.pptx` bytes of the base + this replica's state, with the local edits craft-live was
-    /// about to drop (a reset, a replica given up), and the copy's name ([`unmerged_name`]);
-    /// None otherwise. Taken once; every hand-over since the last take is in it. A notice
-    /// ([`UNMERGED_TEXT`]) says when one starts waiting: hosts call this after every pump.
-    ///
-    /// [`unmerged_name`]: crate::unmerged_name
     /// [`DeckLive::take_unmerged`], and whether the copy was kept only because the offline buffer
     /// filled ([`FULL_TEXT`]): the host offers it as waiting edits, not as unmerged ones.
     pub fn take_copy(&mut self) -> Option<(String, Vec<u8>, bool)> {
@@ -574,6 +568,12 @@ impl<H: Hub> DeckLive<H> {
         self.take_unmerged().map(|(n, b)| (n, b, full))
     }
 
+    /// The `.pptx` bytes of the base + this replica's state, with the local edits craft-live was
+    /// about to drop (a reset, a replica given up), and the copy's name ([`unmerged_name`]);
+    /// None otherwise. Taken once; every hand-over since the last take is in it. A notice
+    /// ([`UNMERGED_TEXT`]) says when one starts waiting: hosts call this after every pump.
+    ///
+    /// [`unmerged_name`]: crate::unmerged_name
     pub fn take_unmerged(&mut self) -> Option<(String, Vec<u8>)> {
         let u = self.map.unmerged.take()?;
         let at = u.at.or_else(local_now).unwrap_or_default();

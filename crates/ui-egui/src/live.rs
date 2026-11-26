@@ -391,8 +391,14 @@ impl SlideApp {
             self.pending_unmerged.push(copy);
         }
         if !self.pending_unmerged.is_empty() {
-            self.notify(tr(deckcraft_live::UNMERGED_TEXT));
+            self.notify(tr(self.copy_line()));
         }
+    }
+
+    /// What a waiting copy is called: [`FULL_COPY_TEXT`] while every waiting copy was kept only
+    /// because the offline buffer filled, else [`deckcraft_live::UNMERGED_TEXT`].
+    pub(crate) fn copy_line(&self) -> &'static str {
+        if self.pending_unmerged.iter().all(|(n, _)| self.full_copies.contains(n)) { FULL_COPY_TEXT } else { deckcraft_live::UNMERGED_TEXT }
     }
 
     /// The window is closing for good: ends the live session and offers each copy still waiting
@@ -491,7 +497,7 @@ impl SlideApp {
                 line.push_str(tr(LIVE_ENDED_TEXT));
                 line.push(' ');
             }
-            line.push_str(tr(deckcraft_live::UNMERGED_TEXT));
+            line.push_str(tr(self.copy_line()));
             self.notify(line.clone());
             self.set_status(line);
         }
@@ -718,8 +724,7 @@ pub(crate) fn status_strip(app: &mut SlideApp, ui: &mut Ui) {
     }
     let copy_waiting = !app.pending_unmerged.is_empty();
     // Only copies a full offline buffer kept: they wait to be sent, nothing failed to merge.
-    let copy_line =
-        if app.pending_unmerged.iter().all(|(n, _)| app.full_copies.contains(n)) { FULL_COPY_TEXT } else { deckcraft_live::UNMERGED_TEXT };
+    let copy_line = app.copy_line();
     let lu = app.live.as_ref().filter(|l| app.backstage.is_none() && l.applies(&app.session));
     let t = Tokens::get(ui.ctx());
     let status = lu.map(LiveUi::status_line);

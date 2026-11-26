@@ -225,7 +225,7 @@ fn a_full_offline_buffer_offers_a_copy_once_and_drops_nothing() {
     assert!(r.peers[0].live.take_unmerged().is_none(), "not offered again while still full");
     r.restore_link(0);
     r.settle();
-    assert!(r.peers[0].live.editable(), "editing resumes once they are sent");
+    assert!(r.peers[0].live.editable(), "editing resumes once the connection is back");
     let at_b = shape_of(&r.peers[1].doc(), a).and_then(|s| s.text).map(|t| t.text()).unwrap_or_default();
     assert_eq!(at_b.matches(&chunk).count(), taken, "every taken edit reached the other editor");
     assert_eq!(told(&r), 1);
