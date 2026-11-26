@@ -200,6 +200,20 @@ pub fn page_dirty(live: bool, docs_dirty: bool, unconfirmed: bool, copies_unsave
     copies_unsaved || if live { unconfirmed } else { docs_dirty }
 }
 
+/// How often a live window asks the page to renew its ticket when one is due (`live-renew`).
+pub const RENEW_ASK_MS: f64 = 20_000.0;
+
+/// Whether a live window asks the page now (`live-renew`): the page renews the ticket from a
+/// timer, and a page whose main thread the editor keeps busy runs that timer minutes late (DC1:
+/// the renewal came after the first ticket expired). The window's own frames run, so it asks
+/// every [`RENEW_ASK_MS`]; the page renews only when its ticket is due. `last`: when it last
+/// asked (page ms), `None` before the first time.
+#[must_use]
+pub fn renew_ask_due(now: f64, last: Option<f64>) -> bool {
+    let _ = (now, last);
+    false
+}
+
 /// Whether `name` is the presentation itself rather than an export (a PDF, a picture, an outline).
 #[must_use]
 pub fn is_presentation(name: &str) -> bool {
@@ -253,6 +267,14 @@ pub fn host_status(status: &LiveStatus) -> (HostStatus, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_window_asks_for_a_renewal_every_twenty_seconds() {
+        assert!(renew_ask_due(1_000.0, None), "the first frame asks");
+        assert!(!renew_ask_due(20_999.0, Some(1_000.0)), "not again within 20 s");
+        assert!(renew_ask_due(21_000.0, Some(1_000.0)), "again after 20 s");
+        assert!(renew_ask_due(500.0, Some(30_000.0)), "a clock that went back asks again");
+    }
 
     fn ticket(claims: &str) -> String {
         format!("{}.c2lnbmF0dXJl", URL_SAFE_NO_PAD.encode(claims))
