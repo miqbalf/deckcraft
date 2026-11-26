@@ -418,12 +418,25 @@ fn undo_never_takes_away_another_editors_text() {
     let kept = replica.text(deckcraft_live::TextTarget::Shape(b)).map(|ps| ps.iter().map(|p| p.text()).collect::<String>()).unwrap_or_default();
     assert!(kept.contains("Bob"), "the tombstone still holds Bob's text: {kept:?}");
     assert!(r.peers[1].notices.iter().any(|n| n.restore == Some(Tomb::Shape(b))), "Bob is offered Restore: {:?}", r.peers[1].notices);
+    // Redo (LP1 guards both ways, DC1 review m9): Ann's box comes back with Bob's text in it,
+    // once, on both pages.
+    redo(&mut r, 0);
+    r.settle();
+    for (i, peer) in r.peers.iter().enumerate() {
+        let t = shape_of(&peer.doc(), b).and_then(|s| s.text.map(|t| t.text())).unwrap_or_default();
+        assert_eq!(t.matches("Bob").count(), 1, "peer {i}: Ann's redo brought Bob's text back once: {t:?}");
+    }
+    r.assert_converged();
+    // Undone again, then Bob's Restore: his text is back once.
+    undo(&mut r, 0);
+    r.settle();
+    assert!(shape_of(&r.peers[1].doc(), b).is_none(), "undone again");
     let p = &mut r.peers[1];
     p.live.restore(&mut p.session, Tomb::Shape(b)).expect("restore");
     r.settle();
     for (i, peer) in r.peers.iter().enumerate() {
         let t = shape_of(&peer.doc(), b).and_then(|s| s.text.map(|t| t.text())).unwrap_or_default();
-        assert!(t.contains("Bob"), "peer {i}: Bob's text is back: {t:?}");
+        assert_eq!(t.matches("Bob").count(), 1, "peer {i}: Bob's text is back once: {t:?}");
     }
     r.assert_converged();
 }

@@ -523,6 +523,17 @@ fn a_full_buffer_copy_has_its_own_line_in_the_strip() {
     room.h.get_by_label(deckcraft_live::UNMERGED_TEXT);
 }
 
+/// DC1 review m8: when the live presentation ends with only a full-buffer copy waiting, the
+/// window says the copy holds waiting changes, not that some could not be merged.
+#[test]
+fn ending_with_only_a_full_buffer_copy_says_so() {
+    let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, cancelling());
+    room.h.state_mut().keep_copy(copy(), true);
+    room.h.state_mut().end_live();
+    let said = room.h.state().toast.as_ref().map(|t| t.text.clone()).unwrap_or_default();
+    assert_eq!(said, super::live::FULL_COPY_TEXT);
+}
+
 #[test]
 fn a_cancelled_save_keeps_the_copy() {
     let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, cancelling());
@@ -1422,6 +1433,78 @@ fn web_paste_of_an_animated_slide_is_refused_with_the_reason() {
     assert!(status.contains("can't be copied while editing live"), "Ann is told why: {status:?}");
 }
 
+/// A test link whose relay messages, `Joined` among them, are held back for `hold` polls: a
+/// renewed link that is still joining while the person types (DC1 review m3).
+struct Slow {
+    hub: MemHub,
+    hold: usize,
+    held: Vec<craft_collab::ServerMsg>,
+}
+
+impl Slow {
+    fn new(hub: MemHub, hold: usize) -> Slow {
+        Slow { hub, hold, held: Vec::new() }
+    }
+}
+
+impl craft_collab::Hub for Slow {
+    fn send(&mut self, msg: craft_collab::ClientMsg) -> craft_collab::Result<()> {
+        self.hub.send(msg)
+    }
+    fn poll(&mut self) -> Vec<craft_collab::ServerMsg> {
+        if self.hold > 0 {
+            self.hold -= 1;
+            let got = self.hub.poll();
+            self.held.extend(got);
+            return Vec::new();
+        }
+        let mut out = std::mem::take(&mut self.held);
+        out.extend(self.hub.poll());
+        out
+    }
+    fn connected(&self) -> bool {
+        self.hub.connected()
+    }
+    fn set_token(&mut self, token: String) {
+        self.hub.set_token(token);
+    }
+    fn set_space(&mut self, space: u32) {
+        self.hub.set_space(space);
+    }
+    fn close(&mut self) {
+        self.hub.close();
+    }
+}
+
+/// DC1 review m2: closing a live presentation whose hub renews tickets closes the link in use
+/// (`BoxHub` forwards `Hub::close` to the `Handover`). The relay link has no `Drop`, so without
+/// the forward it stays in the room.
+#[test]
+fn closing_a_renewing_live_presentation_leaves_the_room() {
+    let bytes = deck(false);
+    let relay = MemRelay::new();
+    let first = relay.connect("ann", "Ann", true);
+    let r2 = relay.clone();
+    let hub = super::live::renewing(first.clone(), move |_: &craft_collab::Reopen<'_>| Ok(r2.connect("ann", "Ann", true)));
+    let mut session = Session::new();
+    let base = BaseFile { bytes: &bytes, name: NAME, expected_sha256: None };
+    let live = DeckLive::start(hub, ROOM, &base, Access::Edit, "ann", &mut session).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_ui_state(
+        |ui, app: &mut SlideApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        SlideApp::new(session, Services { live: Some(live), ..Default::default() }),
+    );
+    h.run_steps(3);
+    use craft_collab::Hub as _;
+    assert!(first.connected(), "in the room while open");
+    let _ = h.state_mut().run("file.close", json!({}));
+    h.run_steps(2);
+    assert!(h.state().live.is_none(), "the window let the live session go");
+    assert!(!first.connected(), "and closed its link to the room");
+}
+
 /// DC1 (LP2's switch on DeckCraft): Ann's hub is the web host's, [`super::live::renewing`]. A
 /// renewed ticket opens a second link; once it has joined Ann is on it, and the old ticket's
 /// expiry (its link dropped by the relay) costs nothing: what Ann typed before, during and after
@@ -1435,9 +1518,10 @@ fn a_renewed_ticket_switches_links_with_no_drop_and_no_lost_typing() {
     let first = relay.connect("ann", "Ann", true);
     let opened = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let (r2, o2) = (relay.clone(), opened.clone());
-    let hub = super::live::renewing(first.clone(), move |r: &craft_collab::Reopen<'_>| {
+    // The renewed link joins only after 3 polls, so typing goes on while it is pending.
+    let hub = super::live::renewing(Slow::new(first.clone(), 0), move |r: &craft_collab::Reopen<'_>| {
         o2.lock().unwrap().push(r.ticket.to_owned());
-        Ok(r2.connect("ann", "Ann", true))
+        Ok(Slow::new(r2.connect("ann", "Ann", true), 3))
     });
     let mut session = Session::new();
     let mut live = DeckLive::start(hub, ROOM, &base, Access::Edit, "ann", &mut session).unwrap();
@@ -1473,10 +1557,16 @@ fn a_renewed_ticket_switches_links_with_no_drop_and_no_lost_typing() {
     // The page's ticket refresh, as the host hands it in.
     use craft_collab::Hub as _;
     room.h.state_mut().live.as_mut().unwrap().live_mut().core_mut().hub_mut().set_token("renewed".into());
-    typed(&mut room, "2");
-    assert!(live_now(&room), "Live while the new link joins");
+    for _ in 0..3 {
+        typed(&mut room, "2");
+        assert!(live_now(&room), "Live while the new link joins");
+    }
     room.settle();
     assert_eq!(*opened.lock().unwrap(), vec!["renewed".to_owned()], "one new link, opened with the renewed ticket");
+    // The switch closed the old link (review m1): it is not in the room, and Bob sees one Ann.
+    assert!(!first.connected(), "the old link was closed at the switch");
+    let peers = room.bob.live.pump(&mut room.bob.session);
+    assert_eq!(peers.iter().filter(|p| craft_live::uid_of(&p.id) == "ann").count(), 1, "Bob sees one Ann after the switch: {peers:?}");
     typed(&mut room, "3");
     // The old ticket expires: the relay drops the first link.
     room.relay.drop_link(&first);
@@ -1486,11 +1576,16 @@ fn a_renewed_ticket_switches_links_with_no_drop_and_no_lost_typing() {
         room.settle();
     }
     let at_bob = room.bob.doc().slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text();
-    assert_eq!(at_bob, "alpha123444", "every keystroke reached Bob, in order");
+    assert_eq!(at_bob, "alpha12223444", "every keystroke reached Bob, in order");
     let peers = room.bob.live.pump(&mut room.bob.session);
     assert_eq!(peers.iter().filter(|p| craft_live::uid_of(&p.id) == "ann").count(), 1, "Bob sees one Ann: {peers:?}");
     let ann = room.ann_doc().slides[1].shape(alpha).unwrap().text.as_ref().unwrap().text();
     assert_eq!(ann, at_bob, "both pages agree");
+    // Closing after the switch closes the renewed link too (review m2).
+    let _ = room.h.state_mut().run("file.close", json!({}));
+    room.settle();
+    let peers = room.bob.live.pump(&mut room.bob.session);
+    assert!(peers.iter().all(|p| craft_live::uid_of(&p.id) != "ann"), "Ann left the room: {peers:?}");
 }
 
 /// DP1 parked item (DC1): Ctrl+Shift+V's paste is shared at once, as its key was before DP1
