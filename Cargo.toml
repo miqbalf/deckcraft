@@ -42,11 +42,12 @@ deckcraft-media = { path = "crates/media" }
 deckcraft-live = { path = "crates/live" }
 # Live co-editing (collab-craft, miqbalf fork): departs from AGENTS.md rule 10 by owner decision
 # (as for GridCraft and WordCraft). All three come from one collab-craft revision
-# (origin/fix/live-combined 14594e0b: the C9 line with C13 and C14, LP2's Handover for a ticket
-# renewal without a drop, and LP1's Undo/Redo guard; the relay's wire protocol is unchanged).
-craft-collab = { git = "https://github.com/miqbalf/collab-craft", rev = "14594e0b8ddae94336c7254d7ebc032aa8670044", version = "=0.1.0" }
-craft-live = { git = "https://github.com/miqbalf/collab-craft", rev = "14594e0b8ddae94336c7254d7ebc032aa8670044", version = "=0.1.0" }
-craft-live-worker = { git = "https://github.com/miqbalf/collab-craft", rev = "14594e0b8ddae94336c7254d7ebc032aa8670044", version = "=0.1.0" }
+# (origin/fix/live-combined d006c2c3: the C9 line with C13 and C14, LP2's Handover for a ticket
+# renewal without a drop, LP1's Undo/Redo guard, and LI2's wake and first-connect notice fix;
+# the relay's wire protocol is unchanged).
+craft-collab = { git = "https://github.com/miqbalf/collab-craft", rev = "d006c2c3d682ab7343f408ce35d9eb1e691c2a92", version = "=0.1.0" }
+craft-live = { git = "https://github.com/miqbalf/collab-craft", rev = "d006c2c3d682ab7343f408ce35d9eb1e691c2a92", version = "=0.1.0" }
+craft-live-worker = { git = "https://github.com/miqbalf/collab-craft", rev = "d006c2c3d682ab7343f408ce35d9eb1e691c2a92", version = "=0.1.0" }
 
 # foundation
 kurbo = { version = "0.13", features = ["serde"] }

@@ -402,3 +402,49 @@ fn a_refused_reconnect_keeps_the_offline_edits_for_the_rejoin() {
     assert!(matches!(r.peers[0].live.status(), LiveStatus::Live { .. }), "{:?}", r.peers[0].live.status());
     r.assert_converged();
 }
+
+/// LI2 (collab-craft d006c2c3): on the web the hub's socket opens only after the deck starts, so
+/// the first pumps see a link that is not up yet. That first connect is not told as a drop and a
+/// reconnect. A real drop after it is still told, and so is the rejoin.
+#[test]
+fn the_first_connect_is_not_told_as_a_drop_and_a_reconnect() {
+    use craft_live::Access;
+    use craft_live::testing::{MemRelay, ROOM};
+    use deckcraft_engine::Session;
+    use deckcraft_live::{BaseFile, DeckLive};
+
+    const LINK: &str = "connected to the other editors";
+    let relay = MemRelay::new();
+    let hub = relay.connect("user0", "User 0", true);
+    // Still connecting when the deck first pumps.
+    relay.drop_link(&hub);
+    let mut session = Session::new();
+    let bytes = basic();
+    let base = BaseFile { bytes: &bytes, name: NAME, expected_sha256: None };
+    let mut live = DeckLive::start(hub.clone(), ROOM, &base, Access::Edit, "user0", &mut session).expect("start");
+    let mut notices = Vec::new();
+    for _ in 0..3 {
+        live.pump(&mut session);
+        notices.extend(live.take_notices());
+    }
+    relay.restore_link(&hub);
+    for _ in 0..8 {
+        live.pump(&mut session);
+        notices.extend(live.take_notices());
+    }
+    assert!(live.editable(), "the deck is live once the link is up");
+    let told = |n: &[deckcraft_live::Notice]| n.iter().filter(|n| n.text.contains(LINK)).count();
+    assert_eq!(told(&notices), 0, "the first connect was told: {:?}", notices.iter().map(|n| &n.text).collect::<Vec<_>>());
+    relay.drop_link(&hub);
+    for _ in 0..2 {
+        live.pump(&mut session);
+        notices.extend(live.take_notices());
+    }
+    assert_eq!(told(&notices), 1, "a real drop is told");
+    relay.restore_link(&hub);
+    for _ in 0..8 {
+        live.pump(&mut session);
+        notices.extend(live.take_notices());
+    }
+    assert_eq!(told(&notices), 2, "and the rejoin after it");
+}
