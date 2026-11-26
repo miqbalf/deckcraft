@@ -562,8 +562,9 @@ impl<H: Hub> DeckLive<H> {
         Ok(())
     }
 
-    /// [`DeckLive::take_unmerged`], and whether the copy was kept only because the offline buffer
-    /// filled ([`FULL_TEXT`]): the host offers it as waiting edits, not as unmerged ones.
+    /// The copy [`DeckLive::take_unmerged`] takes, and whether it was kept only because the
+    /// offline buffer filled ([`FULL_TEXT`]): the host offers it as waiting edits, not as unmerged
+    /// ones.
     pub fn take_copy(&mut self) -> Option<(String, Vec<u8>, bool)> {
         let full = self.map.unmerged.as_ref().is_some_and(|u| u.full);
         self.take_unmerged().map(|(n, b)| (n, b, full))
