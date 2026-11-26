@@ -20,6 +20,7 @@ mod ime;
 mod input;
 mod keys;
 mod playback;
+mod share;
 
 #[cfg(test)]
 pub(crate) use clipboard::{OBJECTS_MARKER, system_clipboard_text};
@@ -110,6 +111,8 @@ impl SlideApp {
             next_file_id: 1,
             pending_files: Vec::new(),
             host_start: None,
+            host_file: None,
+            share_routes: HashMap::new(),
             pending_host_saves: Vec::new(),
             host_fonts_coming: false,
             ime_tracker: egui::ime_context::ImeContextTracker::new(),

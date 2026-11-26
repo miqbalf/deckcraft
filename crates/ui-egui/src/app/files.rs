@@ -578,6 +578,8 @@ impl SlideApp {
             return;
         }
         self.host_start = None;
+        // The page shares this file (`app::share`), until it is saved under another name.
+        self.host_file = self.session.active().map(|d| (d.uid, d.path.clone()));
         if let Some(opened) = self.session.active().map(|d| d.uid)
             && let Some(i) = self.session.documents().iter().position(|d| Some(d.uid) == blank)
         {

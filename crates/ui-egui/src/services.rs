@@ -20,6 +20,31 @@ pub type HostSaveFn = Box<dyn FnMut(&str, &[u8], bool, Option<&str>) -> Result<(
 /// save with that id; `Ok(None)` when it does not answer saves (handed over is stored).
 pub type SaveCopyFn = Box<dyn FnMut(&str, &[u8]) -> Result<Option<String>, String>>;
 
+/// [`Services::share_route`]: where Share goes for a presentation file on this computer
+/// (`craft_share::desktop_route` on the desktop: a file in a folder the Nextcloud desktop client
+/// syncs, else [`craft_share::ShareRoute::None`]).
+pub type ShareRouteFn = Box<dyn Fn(&std::path::Path) -> craft_share::ShareRoute>;
+
+/// [`Services::host_share`]: ask the page framing the app to open its sharing for the file it
+/// opened (`deckcraft:share`). An error means the page didn't get the request.
+pub type HostShareFn = Box<dyn FnMut() -> Result<(), String>>;
+
+/// Whether the page framing the app shares files itself (it answered `share: true` in its `host`
+/// message). Shared between the web shell's listener and the app (a cheap clone).
+#[derive(Clone, Default)]
+pub struct HostShares(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl HostShares {
+    /// The page said it opens Nextcloud's sharing for the file it opened.
+    pub fn set(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// What a page that answers saves said about one that carried an id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostAnswer {
@@ -167,4 +192,13 @@ pub struct Services {
     /// A browser download that does not go through the page: where a copy goes once the page
     /// could not store one.
     pub download_copy: Option<DownloadFn>,
+    /// Desktop: where Share goes for the active presentation's file ([`ShareRouteFn`]). Without
+    /// it (the web build, tests) a file on this computer is not connected to Nextcloud.
+    pub share_route: Option<ShareRouteFn>,
+    /// Web, framed by a page (`?host=parent`): post the page's share request ([`HostShareFn`]).
+    /// Used only once the page said it shares ([`Self::host_shares`]) and only for the file it
+    /// opened in the frame.
+    pub host_share: Option<HostShareFn>,
+    /// Whether the framing page shares files itself ([`HostShares`]).
+    pub host_shares: HostShares,
 }

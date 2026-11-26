@@ -25,6 +25,7 @@ craft-live = { workspace = true }
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 egui_extras = { workspace = true }
 craft-ui = { workspace = true }
+craft-share = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
