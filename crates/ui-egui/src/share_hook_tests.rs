@@ -4,7 +4,7 @@
 
 use deckcraft_engine::Session;
 use egui_kittest::Harness;
-use egui_kittest::kittest::{NodeT as _, Queryable as _};
+use egui_kittest::kittest::Queryable as _;
 use serde_json::json;
 
 use crate::{Services, SlideApp};
