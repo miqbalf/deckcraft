@@ -1560,9 +1560,11 @@ dependencies = [
  "arboard",
  "chrono",
  "cpal",
+ "craft-collab",
  "craft-share",
  "craft-update",
  "deckcraft-engine",
+ "deckcraft-live",
  "deckcraft-media",
  "deckcraft-ui-egui",
  "eframe",
@@ -1572,6 +1574,7 @@ dependencies = [
  "log",
  "rfd",
  "serde_json",
+ "tokio",
  "winit",
  "winresource",
 ]
@@ -1672,7 +1675,7 @@ dependencies = [
 name = "deckcraft-live"
 version = "0.19.0"
 dependencies = [
- "base64 0.23.1",
+ "base64 0.22.1",
  "chrono",
  "craft-collab",
  "craft-live",

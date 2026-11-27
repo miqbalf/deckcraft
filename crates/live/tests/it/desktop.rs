@@ -21,8 +21,8 @@ use serde_json::json;
 use sha2::Sha256;
 
 use crate::support::{NAME, add_box, deck_bytes, find, shape_of};
-use deckcraft_model::ShapeId;
 use crate::trace::deck_of;
+use deckcraft_model::ShapeId;
 
 /// A boxed hub, so the web-like and the desktop client have one type.
 struct Dyn(Box<dyn Hub>);
@@ -175,7 +175,8 @@ async fn a_desktop_window_from_a_session_file_coedits_with_a_web_client() {
     let web_hub = Handover::new(web_hub, |_: &craft_collab::Reopen<'_>| Err(craft_collab::Error::Hub("no renewal in this test".into())));
     let mut web_s = Session::new();
     let base = BaseFile { bytes: &bytes, name: NAME, expected_sha256: Some(sha) };
-    let web_live = DeckLive::start(Dyn(Box::new(web_hub)), &format!("doc:{rm}"), &base, Access::Edit, "web", &mut web_s).expect("the web client starts");
+    let web_live =
+        DeckLive::start(Dyn(Box::new(web_hub)), &format!("doc:{rm}"), &base, Access::Edit, "web", &mut web_s).expect("the web client starts");
     let mut web = Peer { s: web_s, live: web_live };
 
     // The desktop window, from the launcher's hand-off. Its first ticket expires soon.
@@ -194,9 +195,14 @@ async fn a_desktop_window_from_a_session_file_coedits_with_a_web_client() {
     let (web_box, desk_box) = (find(&start, "web"), find(&start, "desk"));
     web.type_into(web_box, " from the browser");
     desk.type_into(desk_box, " from the desktop");
-    until(&mut web, &mut desk, 20, "the first edits on both", |_| {}, |w, d| {
-        same(w, d) && w.text(desk_box).contains("from the desktop") && d.text(web_box).contains("from the browser")
-    })
+    until(
+        &mut web,
+        &mut desk,
+        20,
+        "the first edits on both",
+        |_| {},
+        |w, d| same(w, d) && w.text(desk_box).contains("from the desktop") && d.text(web_box).contains("from the browser"),
+    )
     .await;
 
     // The launcher renews the ticket: the watch sees the rewrite, and the hub takes it.
@@ -210,15 +216,27 @@ async fn a_desktop_window_from_a_session_file_coedits_with_a_web_client() {
     // Past the first ticket's expiry, the desktop link never left Live.
     let mut dropped = false;
     let wait = first_expiry.saturating_duration_since(Instant::now()).as_secs() + 8;
-    until(&mut web, &mut desk, wait + 5, "the first ticket's expiry", |live| dropped |= !live, |_, _| Instant::now() > first_expiry + Duration::from_secs(8))
-        .await;
+    until(
+        &mut web,
+        &mut desk,
+        wait + 5,
+        "the first ticket's expiry",
+        |live| dropped |= !live,
+        |_, _| Instant::now() > first_expiry + Duration::from_secs(8),
+    )
+    .await;
     assert!(!dropped, "the desktop link dropped at the first ticket's expiry: {:?}", desk.live.status());
 
     desk.type_into(desk_box, " after renewal");
     web.type_into(web_box, " again");
-    until(&mut web, &mut desk, 20, "the edits after renewal on both", |_| {}, |w, d| {
-        same(w, d) && w.text(desk_box).contains("after renewal") && d.text(web_box).contains("again")
-    })
+    until(
+        &mut web,
+        &mut desk,
+        20,
+        "the edits after renewal on both",
+        |_| {},
+        |w, d| same(w, d) && w.text(desk_box).contains("after renewal") && d.text(web_box).contains("again"),
+    )
     .await;
 
     // The launcher moved the session to another room: the watch says the window's link ends.

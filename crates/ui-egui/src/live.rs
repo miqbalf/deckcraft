@@ -222,7 +222,16 @@ pub struct LiveUi {
 impl LiveUi {
     #[must_use]
     pub fn new(live: LiveDeck) -> LiveUi {
-        LiveUi { live, peers: Vec::new(), colours: HashMap::new(), bar: PresenceBar::new(), notices: Vec::new(), sent: None, moved: HashMap::new(), saved: None }
+        LiveUi {
+            live,
+            peers: Vec::new(),
+            colours: HashMap::new(),
+            bar: PresenceBar::new(),
+            notices: Vec::new(),
+            sent: None,
+            moved: HashMap::new(),
+            saved: None,
+        }
     }
 
     #[must_use]

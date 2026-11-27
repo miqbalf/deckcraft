@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use craft_collab::Hub as _;
-use deckcraft_live::desktop::{self, Change, LazyHub, NOT_SHARED_TEXT, RESTARTED_TEXT, SessionError, Watch};
+use deckcraft_live::desktop::{self, Change, LazyHub, NOT_SAVING_TEXT, NOT_SHARED_TEXT, RESTARTED_TEXT, SessionError, Watch};
 use deckcraft_live::{BaseFile, DeckLive, LiveFail};
 use deckcraft_ui_egui::SlideApp;
 use deckcraft_ui_egui::live::{renewing, tr};
@@ -42,12 +42,8 @@ pub fn start(app: &mut SlideApp, session: &Path, file: &str) -> Result<DesktopLi
     let sha = s.base_sha256.ok_or(SessionError::NoBaseHash).map_err(|e| not(&e))?;
     let relay = s.relay_endpoint().map_err(|e| not(&e))?;
     let bytes = std::fs::read(file).map_err(|e| not(&e))?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .thread_name("deckcraft-live")
-        .enable_all()
-        .build()
-        .map_err(|e| not(&e))?;
+    let runtime =
+        tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("deckcraft-live").enable_all().build().map_err(|e| not(&e))?;
     let schema = deckcraft_live::schema();
     let hub = LazyHub::connect(runtime.handle(), &relay, &s.ticket, None, &schema);
     // A renewed ticket opens a second link that takes over once it has joined (as the web app's).
@@ -61,6 +57,9 @@ pub fn start(app: &mut SlideApp, session: &Path, file: &str) -> Result<DesktopLi
             app.live_saved_by_room = true;
             app.start_live(live);
             log::info!("live: joining room {} for file {:?}", s.room, s.file_id);
+            if !s.saver {
+                not_saving(app);
+            }
             Ok(DesktopLive { _runtime: runtime, watch: Watch::new(session, &s), next_check: Instant::now() })
         }
         Err(e) => {
@@ -72,6 +71,13 @@ pub fn start(app: &mut SlideApp, session: &Path, file: &str) -> Result<DesktopLi
             Err(NotStarted { why, opened })
         }
     }
+}
+
+/// The room has no document service saving it right now: said, and kept in the status bar.
+fn not_saving(app: &mut SlideApp) {
+    let line = tr(NOT_SAVING_TEXT).to_owned();
+    app.notify(line.clone());
+    app.set_status(line);
 }
 
 /// Said when the file argument is not the room's base file.
@@ -91,7 +97,12 @@ impl DesktopLive {
             return;
         }
         self.next_check = now + Duration::from_millis(desktop::WATCH_EVERY_MS);
-        match self.watch.check() {
+        let saver = self.watch.saver();
+        let change = self.watch.check();
+        if saver && !self.watch.saver() {
+            not_saving(app);
+        }
+        match change {
             Some(Change::Ticket(ticket)) => {
                 if let Some(lu) = app.live.as_mut() {
                     lu.live_mut().core_mut().hub_mut().set_token(ticket);

@@ -32,7 +32,8 @@ pub const RELAY_ELSEWHERE_TEXT: &str = "The live session's relay is not on the f
 /// Said when the session names no checksum for the room's base file, so it cannot be checked.
 pub const NO_BASE_HASH_TEXT: &str = "The live session gives no checksum for the file, so it cannot be checked.";
 /// Said, after the reason, when live editing did not start and the file opened for one person.
-pub const NOT_SHARED_TEXT: &str = "Live editing could not start: {why} Your changes are not shared and stay on this computer; use Save As to keep them.";
+pub const NOT_SHARED_TEXT: &str =
+    "Live editing could not start: {why} Your changes are not shared and stay on this computer; use Save As to keep them.";
 /// Said when the launcher's session moved to another room while this window was in one.
 pub const RESTARTED_TEXT: &str = "The live session was restarted. Reopen the file.";
 /// Said by Save while the live presentation is active, before the room's first save.
@@ -41,6 +42,10 @@ pub const SAVES_LIVE_TEXT: &str = "Live: the server saves this presentation as y
 pub const SAVED_LIVE_TEXT: &str = "Live · saved {time}";
 /// Said by Save while edits are still on their way to the room.
 pub const SENDING_TEXT: &str = "Live: your latest changes are still being sent";
+
+/// Said when the room has no document service saving it right now (the ticket answer's
+/// `saver` is false).
+pub const NOT_SAVING_TEXT: &str = "Changes are not being saved right now";
 
 /// Every English key this module adds, for the translation report.
 pub const ENGLISH_KEYS: &[&str] = &[
@@ -53,6 +58,7 @@ pub const ENGLISH_KEYS: &[&str] = &[
     RESTARTED_TEXT,
     SAVES_LIVE_TEXT,
     SAVED_LIVE_TEXT,
+    NOT_SAVING_TEXT,
     SENDING_TEXT,
 ];
 
@@ -77,6 +83,9 @@ pub struct SessionFile {
     /// The SHA-256 of the room's base file (`base.sha256` of the ticket answer), which the file
     /// argument must be.
     pub base_sha256: Option<[u8; 32]>,
+    /// The ticket answer's `saver`: false when no document service saves the room right now.
+    /// True when the launcher does not say.
+    pub saver: bool,
 }
 
 impl std::fmt::Debug for SessionFile {
@@ -147,9 +156,11 @@ pub fn parse(bytes: &[u8]) -> Result<SessionFile, SessionError> {
         relay_url: need("relayUrl")?,
         room: need("room")?,
         expires_at: text("expiresAt"),
-        read_only: v.get("readOnly").and_then(Value::as_bool).unwrap_or(false),
+        // `permissions` is the ticket answer's own field, taken too in case the launcher copies it.
+        read_only: v.get("readOnly").and_then(Value::as_bool).unwrap_or(false) || text("permissions").as_deref() == Some("read"),
         display_name: text("displayName"),
         base_sha256,
+        saver: v.get("saver").and_then(Value::as_bool).unwrap_or(true),
     })
 }
 
@@ -268,13 +279,14 @@ pub struct Watch {
     ticket: String,
     room: String,
     restarted: bool,
+    saver: bool,
 }
 
 impl Watch {
     /// Watches `path`, whose current contents are `now`.
     #[must_use]
     pub fn new(path: &Path, now: &SessionFile) -> Watch {
-        Watch { path: path.to_owned(), seen: stamp(path), ticket: now.ticket.clone(), room: now.room.clone(), restarted: false }
+        Watch { path: path.to_owned(), seen: stamp(path), ticket: now.ticket.clone(), room: now.room.clone(), restarted: false, saver: now.saver }
     }
 
     /// What changed since the last check, if anything.
@@ -295,6 +307,7 @@ impl Watch {
             }
         };
         self.seen = Some(now);
+        self.saver = file.saver;
         if file.room != self.room {
             self.restarted = true;
             return Some(Change::Restarted);
@@ -304,6 +317,14 @@ impl Watch {
         }
         self.ticket = file.ticket;
         Some(Change::Ticket(self.ticket.clone()))
+    }
+}
+
+impl Watch {
+    /// Whether the newest session file says a document service saves the room.
+    #[must_use]
+    pub fn saver(&self) -> bool {
+        self.saver
     }
 }
 
@@ -501,6 +522,38 @@ mod tests {
         assert_eq!(s.uid().as_deref(), Some("ann"));
         assert_eq!(SessionFile { read_only: true, ..s.clone() }.access(), Access::Read);
         assert_eq!(SessionFile { ticket: ticket(1), ..s }.access(), Access::Read);
+        assert_eq!(parse(&file(r#","permissions":"read""#)).unwrap().access(), Access::Read);
+    }
+
+    /// The launcher's rewrites, as a temporary file renamed over the session file: a fresh
+    /// ticket is told once, a room without a saver is noted, another room ends the session.
+    #[test]
+    fn the_watch_tells_each_rewrite_once() {
+        let dir = std::env::temp_dir().join(format!("deck-watch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("live.json");
+        let write = |extra: &str| {
+            let tmp = dir.join("live.tmp");
+            std::fs::write(&tmp, file(extra)).unwrap();
+            std::fs::rename(&tmp, &path).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        };
+        write("");
+        let mut watch = Watch::new(&path, &read(&path).unwrap());
+        assert_eq!(watch.check(), None);
+        let renewed = String::from_utf8(file(r#","saver":false"#)).unwrap().replace(r#""ticket":"t.s""#, r#""ticket":"t2.s2""#);
+        let tmp = dir.join("live.tmp");
+        std::fs::write(&tmp, renewed).unwrap();
+        std::fs::rename(&tmp, &path).unwrap();
+        assert_eq!(watch.check(), Some(Change::Ticket("t2.s2".into())));
+        assert!(!watch.saver());
+        assert_eq!(watch.check(), None);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let moved = String::from_utf8(file("")).unwrap().replace(r#""room":"inst:7""#, r#""room":"inst:7:new""#);
+        std::fs::write(&tmp, moved).unwrap();
+        std::fs::rename(&tmp, &path).unwrap();
+        assert_eq!(watch.check(), Some(Change::Restarted));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
