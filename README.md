@@ -64,6 +64,16 @@
   <a href="#license-and-credits">License</a>
 </p>
 
+## Fork notes
+
+This fork adds, on top of upstream DeckCraft:
+
+- Hosting inside a web page of a self-hosted file server: the page opens and saves the presentation, and Share asks the page to share the file.
+- Live co-editing of one presentation by several people, through the collab-craft relay, with per-user undo, ticket renewal, and a copy of edits that could not be shared.
+- A live worker that saves the shared presentation back to the file server.
+
+The server app that hosts these builds is not part of this repository.
+
 ## What works today
 
 DeckCraft is in alpha, heading for beta (see the [roadmap](ROADMAP.md)).
