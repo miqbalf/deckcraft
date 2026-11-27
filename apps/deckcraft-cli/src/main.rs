@@ -90,8 +90,10 @@ fn main() -> ExitCode {
         Some("mcp") => report(mcp(rest)),
         Some("live-worker") => report(live_worker_cmd(rest)),
         Some("links") => {
-            use deckcraft_engine::links::{APP_PAGE, DISCORD, GITHUB, WEBSITE};
-            outln!("Discord   {DISCORD}\nWebsite   {WEBSITE}\nApp page  {APP_PAGE}\nGitHub    {GITHUB}");
+            use deckcraft_engine::links::{APP_PAGE, DISCORD, GITHUB, UPSTREAM, WEBSITE};
+            outln!(
+                "App page  {APP_PAGE}\nGitHub    {GITHUB}\nUpstream  {UPSTREAM} (DeckCraft by the ArtCraft team)\nDiscord   {DISCORD} (ArtCraft community)\nWebsite   {WEBSITE} (ArtCraft)"
+            );
             ExitCode::SUCCESS
         }
         Some(other) => unknown(other),
@@ -140,7 +142,7 @@ fn unknown(sub: &str) -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!("{}", help::overview());
-    eprintln!("\nCommunity: {}  ·  {}", deckcraft_engine::links::DISCORD, deckcraft_engine::links::APP_PAGE);
+    eprintln!("\nProject: {}  ·  based on DeckCraft by the ArtCraft team: {}", deckcraft_engine::links::APP_PAGE, deckcraft_engine::links::UPSTREAM);
     ExitCode::FAILURE
 }
 
