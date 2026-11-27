@@ -27,7 +27,11 @@ impl SlideApp {
     pub fn share_route(&mut self) -> ShareRoute {
         let Some((uid, path)) = self.session.active().map(|d| (d.uid, d.path.clone())) else { return ShareRoute::None };
         if self.services.host_share.is_some() && self.services.host_shares.get() {
-            // The page shares only the file it opened in the frame, under the name it had then.
+            // The page shares only the file it opened in the frame, under the name it had then:
+            // a host save under another name (Save As, a conflict copy) sets the path, and the
+            // presentation shown is then another Nextcloud file than the one the page shares.
+            // The live start binds the room's presentation the same way. GridCraft binds by uid
+            // alone because it never sets that path on the web (SH2 fix 1, review I3).
             let same = self.host_file.as_ref().is_some_and(|(u, p)| *u == uid && *p == path);
             return if same { ShareRoute::NextcloudWebHost } else { ShareRoute::None };
         }
