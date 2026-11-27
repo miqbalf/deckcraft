@@ -1168,6 +1168,7 @@ fn share_asks_the_page_after_a_renewed_ticket() {
     let (app, asked) = page_window(hub, Access::Edit, "ann");
     let mut h = frames(app);
     h.run_steps(3);
+    use craft_collab::Hub as _;
     h.state_mut().live.as_mut().unwrap().live_mut().core_mut().hub_mut().set_token("renewed".into());
     h.run_steps(10);
     assert!(h.state().live.is_some(), "still live after the renewal");
