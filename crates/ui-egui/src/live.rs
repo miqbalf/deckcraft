@@ -388,6 +388,34 @@ impl LiveUi {
         }
     }
 
+    /// The live session as the control channel's `ui.inspect` reports it (`live`): the link's
+    /// state as one word a script can test, and what the strip and Save say to the person.
+    #[must_use]
+    pub fn inspect(&self) -> Value {
+        let status = self.live.status();
+        let state = match status {
+            LiveStatus::Connecting => "connecting",
+            LiveStatus::Live { .. } => "live",
+            LiveStatus::ReadOnly => "readOnly",
+            LiveStatus::Reconnecting => "reconnecting",
+            LiveStatus::Refused(_) => "refused",
+            LiveStatus::Broken(_) => "broken",
+        };
+        let (line, tip) = self.status_line();
+        let peers: Vec<Value> =
+            self.peers.iter().map(|p| json!({"id": p.id, "display": p.display, "viewing": p.access == craft_live::Access::Read})).collect();
+        json!({
+            "state": state,
+            "status": line,
+            "tip": tip,
+            "save": self.save_line(),
+            "readOnly": matches!(status, LiveStatus::ReadOnly),
+            "unconfirmed": self.live.core().live().unconfirmed_edits(),
+            "peers": peers,
+            "notice": self.notices.last().map(|n| tr(&n.text).to_owned()),
+        })
+    }
+
     /// Brings back what a notice was about.
     ///
     /// # Errors

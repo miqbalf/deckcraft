@@ -20,6 +20,12 @@ answered `busy`), 10 minutes idle and 30 seconds per blocked reply write before 
 abandoned: the UI skips it, so a retry cannot run it twice. If the UI had already started it, the reply
 says the outcome is unknown instead of `timeout`.
 
+The idle close is silent: the server ends the socket without a reply. A client that keeps one
+connection across long quiet spells (a test run that waits out a ticket's lifetime, an agent waiting
+for a person) has to notice the closed socket and connect again before its next request, as
+`deckcraft-cli mcp --connect` does. Writing into the closed socket and waiting for a reply only
+ever times out, while a fresh connection is answered at once.
+
 ```json
 {"id": 1, "method": "engine.execute", "params": {"command": "shape.insert", "params": {"preset": "roundRect", "rect": [100, 100, 240, 120], "text": "Hello"}}}
 {"id": 1, "ok": true, "result": {"id": 258}}
@@ -32,7 +38,7 @@ Coordinates are slide points (1/72 inch; a 16:9 slide is 960 × 540) unless note
 | `engine.execute` / `ui.menu.invoke` / `command` | `{command, params}` | Run any command (see `engine.commands`; `deckcraft-cli describe COMMAND` documents one) |
 | `engine.commands` | — | Every command: id, label, menu path, shortcut, params doc, enabled / disabled reason |
 | `document.inspect` | — | Slides, sections, layouts, shapes, selection |
-| `ui.inspect` | — | UI state, active tool, window/canvas/slide rects, dialog, `home` (the File tab over an open presentation), `backstage` (the current File page, including the start screen), slide show state (`grid`, `zoomArm`, `zoom`, `blank`, `presenterPaused`, `presenterSecs`, `notesPx`, `custom`, `goto`; `cells` when See All Slides is open), `animPreview` (canvas playback: slide, time, duration), documents, perf (fps, render ms) |
+| `ui.inspect` | — | UI state, active tool, window/canvas/slide rects, dialog, `home` (the File tab over an open presentation), `backstage` (the current File page, including the start screen), slide show state (`grid`, `zoomArm`, `zoom`, `blank`, `presenterPaused`, `presenterSecs`, `notesPx`, `custom`, `goto`; `cells` when See All Slides is open), `animPreview` (canvas playback: slide, time, duration), documents, perf (fps, render ms), `live` (null outside a live session; else `state`: `connecting`, `live`, `readOnly`, `reconnecting`, `refused` or `broken`, the strip's `status` and `tip`, Save's `save` line, `readOnly`, `unconfirmed` edits, `peers` with `id`, `display`, `viewing`, the newest `notice`, `copiesWaiting`) |
 | `ui.tool.select` | `{tool, preset?}` | `select`, `text`, `shape` + preset, any preset name, `curve`, `freeform`, `scribble`, `pen`, `highlighter`, `eraser` |
 | `ui.pointer` | `{events: [{kind: down\|drag\|up\|move\|doubleclick\|tripleclick\|contextclick, x, y, mods?, pressure?}], mods?}` | Send slide-point pointer events through the active tool's mouse path. `contextclick` performs the right-click selection used by context menus; `pressure` is `0..=1` for a pen and can be omitted for a mouse |
 | `ui.key` | `{key, shift?, alt?, cmd?}` | Send a key press. During an active slide show, digits followed by Enter jump to that slide; G opens See All Slides, Z arms zoom, T toggles the presenter timer's pause, R resets it, and `[` / `]` resize notes. Esc clears a typed slide number or backs out of the grid/zoom before ending the active show. Close See All Slides with Esc or G before using the other listed show shortcuts. Slide-show keys ignore modifier flags; use `show.end` to leave the end-of-show screen. Outside a show, Escape stops canvas animation preview |

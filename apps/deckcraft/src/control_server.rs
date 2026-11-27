@@ -140,6 +140,8 @@ impl Drop for Slot {
 enum Line {
     Text(Vec<u8>),
     TooLong,
+    /// No byte arrived within the idle timeout.
+    Idle,
     Closed,
 }
 
@@ -148,6 +150,7 @@ fn read_line(r: &mut impl BufRead, max: usize) -> Line {
     let mut buf = Vec::new();
     let limit = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
     match r.by_ref().take(limit).read_until(b'\n', &mut buf) {
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Line::Idle,
         Ok(0) | Err(_) => Line::Closed,
         Ok(_) => {
             if buf.last() == Some(&b'\n') {
@@ -254,6 +257,12 @@ fn serve(stream: TcpStream, tx: &SyncSender<ControlRequest>, ctx: &egui::Context
             Line::TooLong => {
                 let _ = writeln!(out, "{}", json!({"ok": false, "error": format!("request line longer than {} bytes", limits.max_line)}));
                 close_politely(&out, &mut reader, limits.write_timeout);
+                break;
+            }
+            Line::Idle => {
+                // Silent on the wire (see docs/control-protocol.md), so say it here: a client that
+                // writes into this socket later only ever times out.
+                log::info!("control client sent nothing for {} s; closing its connection", limits.idle_timeout.as_secs());
                 break;
             }
             Line::Closed => break,
