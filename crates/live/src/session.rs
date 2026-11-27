@@ -594,6 +594,15 @@ impl<H: Hub> DeckLive<H> {
         self.wall = Some(clock);
     }
 
+    /// The person's local date and time now, on the host's wall clock when it gave one
+    /// ([`DeckLive::set_wall_clock`]); `None` when there is none.
+    pub fn local_time(&mut self) -> Option<chrono::NaiveDateTime> {
+        match self.wall.as_mut() {
+            Some(f) => Some(f()),
+            None => local_now(),
+        }
+    }
+
     /// The clock the link and the hold budget run on, in ms (a browser host passes the page's).
     pub fn set_clock(&mut self, clock: Box<dyn FnMut() -> f64 + Send>) {
         *self.clock.lock().unwrap_or_else(PoisonError::into_inner) = Some(clock);

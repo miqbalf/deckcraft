@@ -387,6 +387,10 @@ pub struct SlideApp {
     ime_reset: HashMap<egui::ViewportId, ImeResetPhase>,
     /// The presentation edited live with other people, while it is open ([`live::LiveUi`]).
     pub live: Option<live::LiveUi>,
+    /// The live room saves the live presentation on the server (the desktop app joined from the
+    /// launcher): Save says so instead of writing a file, and the presentation counts as saved
+    /// once the room has every edit ([`SlideApp::save`]).
+    pub live_saved_by_room: bool,
     /// Copies of local edits the live room never got, waiting to be saved: (file name, `.pptx`).
     /// Kept until the host took one (a download, or a write that succeeded).
     pub(crate) pending_unmerged: Vec<(String, Vec<u8>)>,

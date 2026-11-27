@@ -28,6 +28,11 @@ chrono = { workspace = true }
 winresource = "0.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Live co-editing joined from the launcher (`--live-session`): the session over the native socket
+# hub, which runs on a Tokio runtime of its own. All already in Cargo.lock.
+deckcraft-live = { workspace = true, features = ["native-hub"] }
+craft-collab = { workspace = true, features = ["native-hub"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 craft-update = { workspace = true }
 rfd = { workspace = true }
 arboard = { workspace = true, features = ["image-data"] }

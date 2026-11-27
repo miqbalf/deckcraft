@@ -10,6 +10,7 @@
 
 mod app;
 pub mod build;
+pub mod desktop;
 pub mod doc;
 pub mod gate;
 pub mod kind;

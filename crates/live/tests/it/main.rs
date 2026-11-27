@@ -1,4 +1,6 @@
 //! The one integration test binary of `deckcraft-live`; modules sit beside this file.
+#[cfg(feature = "native-hub")]
+mod desktop;
 mod doc;
 mod free;
 mod gate;

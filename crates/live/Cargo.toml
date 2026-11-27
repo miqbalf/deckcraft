@@ -11,8 +11,8 @@ workspace = true
 [features]
 # An in-memory relay so tests can join a real session with no server (dev use only).
 test-util = ["craft-live/test-util"]
-# The native socket hub, for the relay tests.
-native-hub = ["craft-collab/native-hub"]
+# The native socket hub: the desktop app's live sessions ([`desktop`]) and the relay tests.
+native-hub = ["craft-collab/native-hub", "dep:tokio"]
 
 [dependencies]
 deckcraft-model = { workspace = true }
@@ -28,6 +28,10 @@ thiserror = { workspace = true }
 sha2 = { workspace = true }
 # The unmerged copy's name (`unmerged_name`).
 chrono = { workspace = true }
+# Reads a live ticket's claims (`desktop`); already in Cargo.lock (deckcraft-web uses it).
+base64 = { workspace = true }
+# The desktop hub connects in the background (`desktop::LazyHub`); already in Cargo.lock.
+tokio = { version = "1", features = ["rt", "time"], optional = true }
 
 # The local wall clock for the unmerged copy's name (no clock on wasm: the host gives one).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -37,7 +41,6 @@ chrono = { workspace = true, features = ["clock"] }
 proptest = { workspace = true }
 craft-live = { workspace = true, features = ["test-util"] }
 # The relay tests (feature `native-hub`): mint relay tickets (HMAC-SHA256 over the base64url
-# payload) and drive the native hub. All three are already in Cargo.lock.
-base64 = "0.23"
+# payload) and drive the native hub. Both are already in Cargo.lock.
 hmac = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
