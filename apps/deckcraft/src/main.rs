@@ -335,32 +335,10 @@ fn main() -> eframe::Result {
             if sample && let Err(e) = deckcraft_engine::sample::open_sample(&mut app.session) {
                 log::error!("sample: {e}");
             }
-            // `--live-session`: the first file is the room's base. When the session does not
-            // start, the file opens for one person and the window says its changes stay here.
+            // `--live-session`: the first file is the room's base. When the window can't go live,
+            // it tells the launcher (which then uploads the saves) and opens the file for one person.
             let mut files = files;
-            let live = match (&live_session, files.first()) {
-                (Some(session), Some(base)) => match live_session::start(&mut app, std::path::Path::new(session), base) {
-                    Ok(live) => {
-                        files.remove(0);
-                        Some(live)
-                    }
-                    Err(e) => {
-                        log::warn!("live editing did not start: {}", e.why);
-                        if e.opened {
-                            files.remove(0);
-                        }
-                        let line = live_session::not_shared_line(&e.why);
-                        app.notify(line.clone());
-                        app.set_status(line);
-                        None
-                    }
-                },
-                (Some(_), None) => {
-                    log::warn!("--live-session without a file: opened nothing live");
-                    None
-                }
-                _ => None,
-            };
+            let live = live_session.as_deref().and_then(|session| live_session::open(&mut app, session, &mut files));
             // A .ppsx opened last starts its slide show (#862).
             for (f, e) in app.open_from_system(&files) {
                 log::error!("{f}: {e}");

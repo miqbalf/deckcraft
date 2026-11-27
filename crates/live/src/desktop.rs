@@ -31,9 +31,13 @@ pub const MISSING_TEXT: &str = "The live session file has no {field}.";
 pub const RELAY_ELSEWHERE_TEXT: &str = "The live session's relay is not on the file's server.";
 /// Said when the session names no checksum for the room's base file, so it cannot be checked.
 pub const NO_BASE_HASH_TEXT: &str = "The live session gives no checksum for the file, so it cannot be checked.";
-/// Said, after the reason, when live editing did not start and the file opened for one person.
-pub const NOT_SHARED_TEXT: &str =
-    "Live editing could not start: {why} Your changes are not shared and stay on this computer; use Save As to keep them.";
+/// Said when live editing did not start and the file opened for one person: the launcher took
+/// the fallback signal ([`write_fallback`]) and uploads what is saved. `{why}` ends with a stop.
+pub const NOT_SHARED_TEXT: &str = "Live editing isn't available: {why} Changes upload when you save.";
+/// Fallback reason: the relay refused the link before it ever joined.
+pub const RELAY_REFUSED_TEXT: &str = "The relay refused the live session.";
+/// Fallback reason: the relay did not join the link in time.
+pub const RELAY_UNREACHABLE_TEXT: &str = "The relay could not be reached.";
 /// Said when the launcher's session moved to another room while this window was in one.
 pub const RESTARTED_TEXT: &str = "The live session was restarted. Reopen the file.";
 /// Said by Save while the live presentation is active, before the room's first save.
@@ -60,7 +64,46 @@ pub const ENGLISH_KEYS: &[&str] = &[
     SAVED_LIVE_TEXT,
     NOT_SAVING_TEXT,
     SENDING_TEXT,
+    RELAY_REFUSED_TEXT,
+    RELAY_UNREACHABLE_TEXT,
 ];
+
+/// The file that tells the launcher this window opened for one person: `<session file>.fallback`.
+#[must_use]
+pub fn fallback_path(session: &Path) -> PathBuf {
+    let mut name = session.as_os_str().to_owned();
+    name.push(".fallback");
+    PathBuf::from(name)
+}
+
+/// Tells the launcher the window opened the file for one person (brief section 2b), so it takes
+/// the check-out flow and uploads the saves: writes `{"v":1,"reason":…}` to [`fallback_path`],
+/// readable by its owner only, through a temporary file renamed over it. `reason` is a short
+/// English line with no secrets.
+///
+/// # Errors
+/// The write's.
+pub fn write_fallback(session: &Path, reason: &str) -> std::io::Result<()> {
+    let path = fallback_path(session);
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let body = serde_json::to_vec(&serde_json::json!({"v": SESSION_VERSION, "reason": reason})).map_err(std::io::Error::other)?;
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        open.mode(0o600);
+    }
+    {
+        use std::io::Write as _;
+        let mut f = open.open(&tmp)?;
+        f.write_all(&body)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)
+}
 
 /// The relay's permission bit for changing the file (OCS numbering: read 1, update 2).
 const PERMISSION_UPDATE: u64 = 2;
@@ -553,6 +596,25 @@ mod tests {
         std::fs::write(&tmp, moved).unwrap();
         std::fs::rename(&tmp, &path).unwrap();
         assert_eq!(watch.check(), Some(Change::Restarted));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_fallback_signal_sits_beside_the_session_file_for_its_owner_only() {
+        let dir = std::env::temp_dir().join(format!("deck-fallback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("abc.json");
+        write_fallback(&session, RELAY_UNREACHABLE_TEXT).unwrap();
+        let path = fallback_path(&session);
+        assert_eq!(path, dir.join("abc.json.fallback"));
+        let v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["v"], 1);
+        assert_eq!(v["reason"], RELAY_UNREACHABLE_TEXT);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0, "others can read it");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

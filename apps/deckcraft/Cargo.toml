@@ -32,6 +32,7 @@ winresource = "0.1"
 # hub, which runs on a Tokio runtime of its own. All already in Cargo.lock.
 deckcraft-live = { workspace = true, features = ["native-hub"] }
 craft-collab = { workspace = true, features = ["native-hub"] }
+craft-live = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 craft-update = { workspace = true }
 rfd = { workspace = true }
