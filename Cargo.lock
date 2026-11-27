@@ -1561,6 +1561,7 @@ dependencies = [
  "chrono",
  "cpal",
  "craft-collab",
+ "craft-live",
  "craft-share",
  "craft-update",
  "deckcraft-engine",
