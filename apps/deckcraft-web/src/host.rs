@@ -36,8 +36,8 @@
 //!   for the file it opened. Share (`file.share`: the title bar's Share button, File › Share,
 //!   command search, automation) then posts `deckcraft:share {}` while that file is the one shown;
 //!   for any other presentation, or without `share`, the app says "No Nextcloud connected" and
-//!   does nothing else. `deckcraft:ready` says `shareButton: true`: the app has its own Share
-//!   button, so the host shows none.
+//!   does nothing else. Framed (`?host=parent`), `deckcraft:ready` says `shareButton: true`: the
+//!   app has its own Share button, so the host shows none.
 //! - `deckcraft:fonts { fonts: [{name, url}] }` (from the host): each same-origin font file is
 //!   fetched and installed like a font the user added; the missing-font notice waits for them.
 //! - `deckcraft:dirty` whenever unsaved changes appear or go away, `deckcraft:failed` when the
@@ -192,8 +192,10 @@ impl Bridge {
     }
 
     pub fn post_ready(&self) {
-        // `shareButton: true`: DeckCraft has its own Share button, so the host shows none.
-        let _ = self.host.post_ready_with(env!("CARGO_PKG_VERSION"), false, true);
+        // Framed (`?host=parent`), `shareButton: true`: DeckCraft has its own Share button, so the
+        // page shows none. Only a parent page shares (as GridCraft and WordCraft say it).
+        let share_button = self.host.mode() == Mode::Parent;
+        let _ = self.host.post_ready_with(env!("CARGO_PKG_VERSION"), false, share_button);
         // A live host waits for the unprefixed `ready` before it sends `live`.
         if self.host.mode() == Mode::Parent {
             let _ = self.host.post_live_ready();
