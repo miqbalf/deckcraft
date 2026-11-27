@@ -1081,12 +1081,12 @@ fn a_live_start_takes_the_place_of_the_hosts_empty_presentation() {
     assert_eq!(app.session.active().map(|d| d.uid), Some(doc), "the live presentation is shown");
 }
 
-/// SH2: on the web the page's file opens live (the live start opens the room's presentation, not
-/// the page's own open), and Share must still ask the page for it.
-#[test]
-fn share_asks_the_page_for_the_live_presentation_it_joined() {
+// --- Share for the page's live presentation (SH2) --------------------------------------------
+
+/// A window framed by a page that shares files (`share: true`), started for the host as the web
+/// shell does, on a live session started on `hub` with `access`; and the count of share requests.
+fn page_window(hub: BoxHub, access: Access, uid: &str) -> (SlideApp, Arc<AtomicU64>) {
     let bytes = deck(false);
-    let relay = MemRelay::new();
     let asked = Arc::new(AtomicU64::new(0));
     let counter = asked.clone();
     let services = Services {
@@ -1100,11 +1100,78 @@ fn share_asks_the_page_for_the_live_presentation_it_joined() {
     let mut app = SlideApp::new(Session::new(), services);
     app.start_for_host().unwrap();
     let base = BaseFile { bytes: &bytes, name: NAME, expected_sha256: None };
-    let live = DeckLive::start(BoxHub(Box::new(relay.connect("ann", "Ann", true))), ROOM, &base, Access::Edit, "ann", &mut app.session).unwrap();
+    let live = DeckLive::start(hub, ROOM, &base, access, uid, &mut app.session).unwrap();
     app.start_live(live);
+    (app, asked)
+}
+
+/// Share, run now, asks the page once more and shows no "No Nextcloud connected".
+fn share_asks_the_page(app: &mut SlideApp, asked: &AtomicU64, case: &str) {
+    let before = asked.load(Ordering::Relaxed);
+    app.toast = None;
     let r = app.run("file.share", json!({})).unwrap();
-    assert_eq!(asked.load(Ordering::Relaxed), 1, "{r}: the page is asked to share the live presentation it joined");
-    assert!(app.toast.is_none(), "no \"No Nextcloud connected\" for the page's own live file");
+    assert_eq!(asked.load(Ordering::Relaxed), before + 1, "{case}: {r}: the page is asked to share the live presentation it joined");
+    assert!(app.toast.is_none(), "{case}: no \"No Nextcloud connected\" for the page's own live file");
+}
+
+fn frames(app: SlideApp) -> Harness<'static, SlideApp> {
+    Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_ui_state(
+        |ui, app: &mut SlideApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        app,
+    )
+}
+
+/// On the web the page's file opens live (the live start opens the room's presentation, not the
+/// page's own open), and Share must still ask the page for it.
+#[test]
+fn share_asks_the_page_for_the_live_presentation_it_joined() {
+    let relay = MemRelay::new();
+    let (mut app, asked) = page_window(BoxHub(Box::new(relay.connect("ann", "Ann", true))), Access::Edit, "ann");
+    share_asks_the_page(&mut app, &asked, "an editor");
+}
+
+/// A read-only or guest ticket: Share is not an edit, so the live gate does not refuse it; whether
+/// this person may share is the Nextcloud page's call.
+#[test]
+fn share_asks_the_page_for_a_viewer_of_the_live_presentation() {
+    let relay = MemRelay::new();
+    let bytes = deck(false);
+    let base = BaseFile { bytes: &bytes, name: NAME, expected_sha256: None };
+    let mut bob_session = Session::new();
+    let _bob = DeckLive::start(relay.connect("bob", "Bob", true), ROOM, &base, Access::Edit, "bob", &mut bob_session).unwrap();
+    let (mut app, asked) = page_window(BoxHub(Box::new(relay.connect("vic", "Vic", false))), Access::Read, "vic");
+    share_asks_the_page(&mut app, &asked, "a read-only viewer");
+}
+
+/// The live session ended: the presentation is still the page's file, so Share still asks the page.
+#[test]
+fn share_asks_the_page_after_the_live_session_ended() {
+    let relay = MemRelay::new();
+    let (app, asked) = page_window(BoxHub(Box::new(relay.connect("ann", "Ann", true))), Access::Edit, "ann");
+    let mut h = frames(app);
+    h.run_steps(3);
+    h.state_mut().end_live();
+    h.run_steps(3);
+    assert!(h.state().live.is_none(), "the window left the live session");
+    share_asks_the_page(h.state_mut(), &asked, "after the live session ended");
+}
+
+/// A renewed ticket switches the link under the same session: Share keeps asking the page.
+#[test]
+fn share_asks_the_page_after_a_renewed_ticket() {
+    let relay = MemRelay::new();
+    let r2 = relay.clone();
+    let hub = super::live::renewing(relay.connect("ann", "Ann", true), move |_: &craft_collab::Reopen<'_>| Ok(r2.connect("ann", "Ann", true)));
+    let (app, asked) = page_window(hub, Access::Edit, "ann");
+    let mut h = frames(app);
+    h.run_steps(3);
+    h.state_mut().live.as_mut().unwrap().live_mut().core_mut().hub_mut().set_token("renewed".into());
+    h.run_steps(10);
+    assert!(h.state().live.is_some(), "still live after the renewal");
+    share_asks_the_page(h.state_mut(), &asked, "after a renewed ticket");
 }
 
 /// A viewer's armed Format Painter does not apply on a click (F7): refused up front, with why.
