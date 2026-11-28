@@ -85,9 +85,9 @@ craft-video = { git = "https://github.com/storytold/craft-libs", rev = "010702ee
 craft-metafile = { git = "https://github.com/storytold/craft-libs", rev = "63196e66f3033a6623eb629af95a104d26986725", version = "=0.1.0" }
 craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "63196e66f3033a6623eb629af95a104d26986725", version = "=0.1.0", default-features = false, features = ["write", "write-simple-text"] }
 # craft-update: app-specific pretend versions apply to startup and manual checks.
-# udinCraft: craft-update comes from the miqbalf fork (feat/udincraft-updates), whose `fork` rules
+# udinCraft: craft-update comes from the miqbalf fork (main, adbb69f0), whose `fork` rules
 # install this fork's unsigned builds from its udincraft-v* releases; the others stay as they were.
-craft-update = { git = "https://github.com/miqbalf/craft-libs", version = "=0.1.0", rev = "66f8a6e6966795fa26445baf2f30d923117a6528", features = ["egui"] }
+craft-update = { git = "https://github.com/miqbalf/craft-libs", version = "=0.1.0", rev = "adbb69f094e001aa53dbf78e8c0036b9c291d013", features = ["egui"] }
 # craft-ui from the miqbalf fork: it carries craft_ui::presence (live co-editing, Ruling D21), at
 # feat/share-hook 0434267c (a fast-forward of 71e6ef89), the same rev as craft-share and
 # craft-web-host. Every other craft-libs crate stays on its storytold rev.
