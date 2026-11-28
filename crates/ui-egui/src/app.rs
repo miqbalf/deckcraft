@@ -127,6 +127,7 @@ impl SlideApp {
             ime_interrupt_pending: false,
             ime_reset: HashMap::new(),
             live,
+            live_saved_by_room: false,
             pending_unmerged: Vec::new(),
             full_copies: Vec::new(),
             unmerged_close_offered: false,

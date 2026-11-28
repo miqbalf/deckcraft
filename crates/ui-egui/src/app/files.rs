@@ -500,6 +500,10 @@ impl SlideApp {
             let _ = self.save_to_host(None);
             return;
         }
+        // The room saves the live presentation: Save says how that stands (Save As stays local).
+        if self.save_live().is_some() {
+            return;
+        }
         if self.session.active().and_then(|d| d.path.clone()).is_some() {
             match self.session.execute("file.save", &json!({})) {
                 Ok(_) => self.set_status("Saved"),

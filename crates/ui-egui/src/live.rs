@@ -215,12 +215,23 @@ pub struct LiveUi {
     sent: Option<SelKey>,
     /// Per editor: a signature of their selection's place and when it last changed (`ui` time).
     moved: HashMap<String, (u64, f64)>,
+    /// The room's newest save marker and the local time (`HH:MM`) this window first saw it.
+    saved: Option<(String, String)>,
 }
 
 impl LiveUi {
     #[must_use]
     pub fn new(live: LiveDeck) -> LiveUi {
-        LiveUi { live, peers: Vec::new(), colours: HashMap::new(), bar: PresenceBar::new(), notices: Vec::new(), sent: None, moved: HashMap::new() }
+        LiveUi {
+            live,
+            peers: Vec::new(),
+            colours: HashMap::new(),
+            bar: PresenceBar::new(),
+            notices: Vec::new(),
+            sent: None,
+            moved: HashMap::new(),
+            saved: None,
+        }
     }
 
     #[must_use]
@@ -284,6 +295,31 @@ impl LiveUi {
             self.sent = key;
         }
         copy
+    }
+
+    /// Notes when the room saved: the local time a new save marker was first seen.
+    fn see_save(&mut self) {
+        let LiveStatus::Live { saved_at: Some(marker) } = self.live.status() else { return };
+        if self.saved.as_ref().is_some_and(|(seen, _)| seen == marker) {
+            return;
+        }
+        let marker = marker.clone();
+        let at = self.live.local_time().map(|t| t.format("%H:%M").to_string()).unwrap_or_default();
+        self.saved = Some((marker, at));
+    }
+
+    /// What Save says about the live presentation, which the room saves: that it saved (and
+    /// when), or that edits are still on their way.
+    #[must_use]
+    pub fn save_line(&self) -> String {
+        use deckcraft_live::desktop::{SAVED_LIVE_TEXT, SAVES_LIVE_TEXT, SENDING_TEXT};
+        if self.live.core().live().unconfirmed_edits() > 0 {
+            return tr(SENDING_TEXT).to_owned();
+        }
+        match &self.saved {
+            Some((_, at)) if !at.is_empty() => tr(SAVED_LIVE_TEXT).replace("{time}", at),
+            _ => tr(SAVES_LIVE_TEXT).to_owned(),
+        }
     }
 
     /// Runs an engine command through the gate; the notices it gave are kept.
@@ -350,6 +386,34 @@ impl LiveUi {
             LiveStatus::Reconnecting => (tr(deckcraft_live::PAUSED_TEXT).to_owned(), None),
             LiveStatus::Refused(why) | LiveStatus::Broken(why) => (tr(why).to_owned(), None),
         }
+    }
+
+    /// The live session as the control channel's `ui.inspect` reports it (`live`): the link's
+    /// state as one word a script can test, and what the strip and Save say to the person.
+    #[must_use]
+    pub fn inspect(&self) -> Value {
+        let status = self.live.status();
+        let state = match status {
+            LiveStatus::Connecting => "connecting",
+            LiveStatus::Live { .. } => "live",
+            LiveStatus::ReadOnly => "readOnly",
+            LiveStatus::Reconnecting => "reconnecting",
+            LiveStatus::Refused(_) => "refused",
+            LiveStatus::Broken(_) => "broken",
+        };
+        let (line, tip) = self.status_line();
+        let peers: Vec<Value> =
+            self.peers.iter().map(|p| json!({"id": p.id, "display": p.display, "viewing": p.access == craft_live::Access::Read})).collect();
+        json!({
+            "state": state,
+            "status": line,
+            "tip": tip,
+            "save": self.save_line(),
+            "readOnly": matches!(status, LiveStatus::ReadOnly),
+            "unconfirmed": self.live.core().live().unconfirmed_edits(),
+            "peers": peers,
+            "notice": self.notices.last().map(|n| tr(&n.text).to_owned()),
+        })
     }
 
     /// Brings back what a notice was about.
@@ -522,8 +586,39 @@ impl SlideApp {
         if let Some((copy, full)) = lu.pump(&mut self.session) {
             self.keep_copy(copy, full);
         }
+        if self.live_saved_by_room {
+            self.room_saved();
+        }
         // Edits and carets from the room arrive without input: keep frames coming.
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+
+    /// The room saves the live presentation: it counts as saved once the room has every edit, so
+    /// closing asks only while edits are still on their way.
+    fn room_saved(&mut self) {
+        let unconfirmed = self.live_unconfirmed();
+        let Some(lu) = self.live.as_mut() else { return };
+        lu.see_save();
+        if unconfirmed || matches!(lu.live.status(), LiveStatus::Broken(_)) {
+            return;
+        }
+        let doc = lu.live.doc();
+        if let Some(st) = self.session.document_mut(doc)
+            && st.is_dirty()
+        {
+            st.saved_doc = st.doc.clone();
+        }
+    }
+
+    /// Save while the live presentation is active and the room saves it: says how the room
+    /// stands instead of writing a file. None when Save goes on as usual.
+    pub(crate) fn save_live(&mut self) -> Option<String> {
+        if !self.live_saved_by_room {
+            return None;
+        }
+        let line = self.live.as_ref().filter(|l| l.applies(&self.session))?.save_line();
+        self.set_status(line.clone());
+        Some(line)
     }
 
     /// Shares what the last input changed now, so it is its own group in the room (as a command

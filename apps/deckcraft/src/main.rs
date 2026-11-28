@@ -1,12 +1,15 @@
 //! DeckCraft desktop app.
 //!
-//! Usage: `deckcraft [--control <port>] [--sample] [--show] [files…]`
+//! Usage: `deckcraft [--control <port>] [--sample] [--show] [--live-session <file>] [files…]`
 //! A PowerPoint Show (`.ppsx`) given last starts its slide show, as a double-click does in PowerPoint.
 //! `deckcraft --help` prints the flags and exits. `deckcraft --version` prints the version and exits.
 //!
 //! `--control <port>` (or `DECKCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server:
 //! `{"id":1,"method":"ui.inspect","params":{}}` → `{"id":1,"ok":true,"result":…}`.
 //! See `deckcraft_ui_egui::control` for the methods.
+//!
+//! `--live-session <file>`: the launcher's session file for live editing a Nextcloud file with
+//! other people; the first file given is the room's base file (see [`live_session`]).
 //!
 //! `log` records go to standard error and `<settings dir>/logs/deckcraft.log` (`RUST_LOG` sets the
 //! levels); see [`logging`].
@@ -22,6 +25,7 @@ mod control_server;
 mod display;
 #[cfg(any(target_os = "windows", test))]
 mod graphics;
+mod live_session;
 mod logging;
 #[cfg(not(target_arch = "wasm32"))]
 mod pasteboard;
@@ -29,33 +33,38 @@ mod pasteboard;
 use deckcraft_engine::Session;
 use deckcraft_ui_egui::{Services, SlideApp};
 
-struct App(
-    SlideApp,
+struct App {
+    app: SlideApp,
     /// Files opened from Finder and quit requests (see `apple_events`).
     #[cfg(target_os = "macos")]
-    fmv_macos_events::Inbox,
-);
+    events: fmv_macos_events::Inbox,
+    /// The live session the launcher started this window for (`--live-session`).
+    live: Option<live_session::DesktopLive>,
+}
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
-        apple_events::poll(&self.1, &mut self.0, ctx);
-        self.0.logic(ctx);
+        apple_events::poll(&self.events, &mut self.app, ctx);
+        if let Some(live) = self.live.as_mut() {
+            live.tick(&mut self.app);
+        }
+        self.app.logic(ctx);
     }
     /// Forward native raw input to the wrapped application once per pass.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        self.0.raw_input_hook(ctx, raw);
+        self.app.raw_input_hook(ctx, raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.0.ui(ui);
+        self.app.ui(ui);
     }
     fn on_exit(&mut self) {
-        save_prefs(&self.0);
+        save_prefs(&self.app);
         // A live session leaves the room, and a copy of edits it never got is offered.
-        self.0.finish_live();
+        self.app.finish_live();
         // The window is closing for good: a ready update's helper starts now and installs it once
         // the process has exited.
-        self.0.start_pending_update();
+        self.app.start_pending_update();
         // macOS (#279): end the process here, before eframe tears the window down. AccessKit's
         // macOS adapter subclasses the window's content view and restores its class on teardown;
         // AppKit's Touch Bar support observes that view (KVO), so in the next display cycle
@@ -65,7 +74,7 @@ impl eframe::App for App {
         // nothing after it is needed: the preferences are saved and the log file is unbuffered.
         // `on_exit` only runs once the app exists, never on a failed start. Same as GridCraft #117.
         #[cfg(target_os = "macos")]
-        self.0.cleanup_print_previews();
+        self.app.cleanup_print_previews();
         #[cfg(target_os = "macos")]
         std::process::exit(0);
     }
@@ -168,6 +177,9 @@ Usage: deckcraft [--control PORT] [--sample] [--show] [FILE...]
   --control PORT  JSON control server on 127.0.0.1:PORT
   --sample        open the sample presentation
   --show          start the slide show
+  --live-session FILE
+                  edit the first FILE live with others, as the launcher's
+                  session FILE says
   --help, -h      print this help and exit
   --version, -V   print the version and exit
 
@@ -177,7 +189,7 @@ A PowerPoint Show (.ppsx) given last starts its slide show.
 enum Startup {
     Help,
     Version,
-    Run { control_port: Option<u16>, files: Vec<String>, sample: bool, show: bool },
+    Run { control_port: Option<u16>, files: Vec<String>, sample: bool, show: bool, live_session: Option<String> },
 }
 
 /// `--help` and `--version` leave before the window and the log file.
@@ -185,12 +197,14 @@ fn startup(mut control_port: Option<u16>, args: impl IntoIterator<Item = String>
     let mut files = Vec::new();
     let mut sample = false;
     let mut show = false;
+    let mut live_session = None;
     let mut args = args.into_iter();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--control" => control_port = args.next().and_then(|p| p.parse().ok()),
             "--sample" => sample = true,
             "--show" => show = true,
+            "--live-session" => live_session = args.next(),
             "--version" | "-V" => return Startup::Version,
             "--help" | "-h" => return Startup::Help,
             // The process serial number older macOS adds when Finder launches the app.
@@ -198,7 +212,7 @@ fn startup(mut control_port: Option<u16>, args: impl IntoIterator<Item = String>
             _ => files.push(a),
         }
     }
-    Startup::Run { control_port, files, sample, show }
+    Startup::Run { control_port, files, sample, show, live_session }
 }
 
 fn app_icon() -> Option<egui::IconData> {
@@ -219,7 +233,7 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    let (control_port, files, sample, show) =
+    let (control_port, files, sample, show, live_session) =
         match startup(std::env::var("DECKCRAFT_CONTROL_PORT").ok().and_then(|p| p.parse().ok()), std::env::args().skip(1)) {
             Startup::Help => {
                 print!("{USAGE}");
@@ -229,7 +243,7 @@ fn main() -> eframe::Result {
                 println!("deckcraft {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
-            Startup::Run { control_port, files, sample, show } => (control_port, files, sample, show),
+            Startup::Run { control_port, files, sample, show, live_session } => (control_port, files, sample, show, live_session),
         };
     log::info!("DeckCraft {} ({} {})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
     // The log file lives under the settings directory; opened after the arguments, so `--help` and
@@ -321,6 +335,10 @@ fn main() -> eframe::Result {
             if sample && let Err(e) = deckcraft_engine::sample::open_sample(&mut app.session) {
                 log::error!("sample: {e}");
             }
+            // `--live-session`: the first file is the room's base. When the window can't go live,
+            // it tells the launcher (which then uploads the saves) and opens the file for one person.
+            let mut files = files;
+            let live = live_session.as_deref().and_then(|session| live_session::open(&mut app, session, &mut files));
             // A .ppsx opened last starts its slide show (#862).
             for (f, e) in app.open_from_system(&files) {
                 log::error!("{f}: {e}");
@@ -328,11 +346,12 @@ fn main() -> eframe::Result {
             if show {
                 app.start_show(0, false);
             }
-            Ok(Box::new(App(
+            Ok(Box::new(App {
                 app,
                 #[cfg(target_os = "macos")]
-                apple_events.connect(&cc.egui_ctx),
-            )))
+                events: apple_events.connect(&cc.egui_ctx),
+                live,
+            }))
         }),
     )
 }
@@ -346,11 +365,12 @@ mod tests {
     #[test]
     fn on_exit_ends_the_process_on_macos() {
         if std::env::var_os("DECKCRAFT_TEST_ON_EXIT").is_some() {
-            let mut app = App(
-                SlideApp::new(Session::new(), Services::default()),
+            let mut app = App {
+                app: SlideApp::new(Session::new(), Services::default()),
                 #[cfg(target_os = "macos")]
-                fmv_macos_events::Inbox::default(),
-            );
+                events: fmv_macos_events::Inbox::default(),
+                live: None,
+            };
             println!("calling on_exit");
             eframe::App::on_exit(&mut app);
             println!("on_exit returned");
@@ -396,12 +416,21 @@ mod tests {
         assert!(matches!(startup(None, ["--version".to_string()]), Startup::Version));
         let launch = startup(Some(9), ["--sample".to_string(), "--control".to_string(), "4242".to_string(), "talk.pptx".to_string()]);
         assert!(matches!(launch, Startup::Run { .. }));
-        if let Startup::Run { control_port, files, sample, show } = launch {
+        if let Startup::Run { control_port, files, sample, show, .. } = launch {
             assert_eq!(control_port, Some(4242));
             assert_eq!(files, ["talk.pptx".to_string()]);
             assert!(sample);
             assert!(!show);
         }
+    }
+
+    /// The session file is the flag's value, never a file to open; the base file stays a file.
+    #[test]
+    fn the_live_session_file_is_not_opened_as_a_presentation() {
+        let launch = startup(None, ["--live-session".to_string(), "/tmp/live/x.json".to_string(), "deck.pptx".to_string()]);
+        let Startup::Run { files, live_session, .. } = launch else { panic!("not a run") };
+        assert_eq!(files, ["deck.pptx".to_string()]);
+        assert_eq!(live_session.as_deref(), Some("/tmp/live/x.json"));
     }
 
     #[test]

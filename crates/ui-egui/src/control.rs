@@ -110,6 +110,11 @@ pub fn inspect(app: &SlideApp, ctx: &egui::Context) -> Value {
         "documents": app.session.documents().iter().map(|d| json!({"title": d.title(), "dirty": d.is_dirty(), "path": d.path})).collect::<Vec<_>>(),
         "status": app.status.as_ref().map(|s| s.0.clone()),
         "perf": {"frameMs": app.perf.frame_ms, "renderMs": app.perf.render_ms, "fps": app.perf.fps},
+        "live": app.live.as_ref().map(|lu| {
+            let mut v = lu.inspect();
+            v["copiesWaiting"] = json!(app.pending_unmerged.len());
+            v
+        }),
     })
 }
 

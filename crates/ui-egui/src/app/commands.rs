@@ -18,6 +18,14 @@ impl SlideApp {
     /// Run a command by id (UI commands here, everything else in the engine). Errors show in the
     /// status bar and are returned.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        // Save by id of a live presentation the room saves: no file is written, as Ctrl+S.
+        if id == "file.save"
+            && params.get("path").is_none()
+            && self.services.host_save.is_none()
+            && let Some(line) = self.save_live()
+        {
+            return Ok(json!({"savedBy": "live", "status": line}));
+        }
         let r = if let Some(why) = self.live_refusal(id) {
             // The live presentation's gate: refused with the reason, nothing changed.
             Err(crate::live::tr(why).to_owned())

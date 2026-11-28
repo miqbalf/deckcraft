@@ -1704,3 +1704,36 @@ fn a_web_ctrl_shift_v_paste_is_shared_before_the_typing_after_it() {
     assert_eq!(t, "alphaPt", "the paste and the typing reached Bob once each");
     assert_eq!(room.relay.seq() - before, 2, "the paste was shared on its own, before the typing");
 }
+
+/// The control channel reports the live session (`ui.inspect` → `live`), so a script can tell a
+/// window that edits live from one that is reconnecting, and see edits still on their way.
+#[test]
+fn ui_inspect_reports_the_live_session() {
+    let live_of = |room: &Room| super::control::inspect(room.ann(), &room.h.ctx)["live"].clone();
+    let mut room = Room::editors(&deck(false));
+    let alpha = find(&room.ann_doc(), "alpha");
+    let v = live_of(&room);
+    assert_eq!(v["state"], "live", "{v}");
+    assert!(v["peers"].as_array().unwrap().iter().any(|p| p["display"] == "Bob"), "Bob is in the room: {v}");
+    room.relay.drop_link(&room.ann_hub);
+    room.settle();
+    let app = room.h.state_mut();
+    app.run("slide.go", json!({"index": 1})).unwrap();
+    app.run("text.edit", json!({"id": alpha.0})).unwrap();
+    app.run("text.insert", json!({"text": "offline"})).unwrap();
+    room.h.run_steps(1);
+    let v = live_of(&room);
+    assert_eq!(v["state"], "reconnecting", "{v}");
+    assert!(v["unconfirmed"].as_u64().unwrap() > 0, "the offline edit is still on its way: {v}");
+    room.relay.restore_link(&room.ann_hub);
+    room.settle();
+    let v = live_of(&room);
+    assert_eq!(v["state"], "live", "{v}");
+    assert_eq!(v["unconfirmed"], 0, "the room has the offline edit: {v}");
+
+    let ro = Room::new(&deck(false), Access::Read, Access::Edit);
+    let v = live_of(&ro);
+    assert_eq!(v["readOnly"], true, "{v}");
+    let plain = SlideApp::new(Session::with_new(), Services::default());
+    assert!(super::control::inspect(&plain, &egui::Context::default())["live"].is_null(), "no live session, no live state");
+}
