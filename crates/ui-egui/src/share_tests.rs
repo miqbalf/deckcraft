@@ -27,7 +27,10 @@ struct Spies {
 fn services(spies: &Spies, desktop: bool, host: bool, page_shares: bool) -> Services {
     let mut s = Services::default();
     let e = spies.exported.clone();
-    s.download = Some(Box::new(move |_: &str, _: &[u8]| e.set(e.get() + 1)));
+    s.download = Some(Box::new(move |_: &str, _: &str, _: &[u8]| {
+        e.set(e.get() + 1);
+        Ok(())
+    }));
     let e = spies.exported.clone();
     s.pick_save = Some(Box::new(move |_: &str| {
         e.set(e.get() + 1);

@@ -477,7 +477,13 @@ impl HostLog {
 /// A web host: every copy is a download.
 fn downloading(log: &HostLog) -> Services {
     let l = log.clone();
-    Services { download: Some(Box::new(move |name: &str, b: &[u8]| l.0.borrow_mut().push((name.to_owned(), b.to_vec())))), ..Default::default() }
+    Services {
+        download: Some(Box::new(move |name: &str, _: &str, b: &[u8]| {
+            l.0.borrow_mut().push((name.to_owned(), b.to_vec()));
+            Ok(())
+        })),
+        ..Default::default()
+    }
 }
 
 /// A desktop host whose Save dialog the person cancels.
@@ -973,7 +979,10 @@ fn answering(copies: &HostLog, downloads: &HostLog) -> (Services, crate::HostSav
             c.0.borrow_mut().push((name.to_owned(), b.to_vec()));
             Ok(s.copy_id())
         })),
-        download_copy: Some(Box::new(move |name: &str, b: &[u8]| d.0.borrow_mut().push((name.to_owned(), b.to_vec())))),
+        download: Some(Box::new(move |name: &str, _: &str, b: &[u8]| {
+            d.0.borrow_mut().push((name.to_owned(), b.to_vec()));
+            Ok(())
+        })),
         ..Default::default()
     };
     (services, saves)
@@ -1040,7 +1049,10 @@ fn a_hand_over_that_could_not_be_posted_is_not_retried() {
             t.0.borrow_mut().push((name.to_owned(), b.to_vec()));
             Err("the page is gone".to_owned())
         })),
-        download_copy: Some(Box::new(move |name: &str, b: &[u8]| d.0.borrow_mut().push((name.to_owned(), b.to_vec())))),
+        download: Some(Box::new(move |name: &str, _: &str, b: &[u8]| {
+            d.0.borrow_mut().push((name.to_owned(), b.to_vec()));
+            Ok(())
+        })),
         ..Default::default()
     };
     let mut room = Room::with_services(&deck(false), Access::Edit, Access::Edit, services);

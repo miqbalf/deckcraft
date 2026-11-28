@@ -363,6 +363,10 @@ fn report_damage(s: &mut Session, damaged: &Damage) -> Result<()> {
     Ok(())
 }
 
+/// Every format `file.export` writes (its aliases `jpg` and `txt` left out). The UI's one Save As
+/// list (`deckcraft_ui_egui::SAVE_AS`) offers each of them; its tests compare the two.
+pub const EXPORT_FORMATS: [&str; 10] = ["pptx", "potx", "ppsx", "deckcraft", "pdf", "outline", "rtf", "png", "jpeg", "gif"];
+
 /// Encode the presentation in `format` (`deckcraft`, `pptx`, `potx`, `ppsx`, `outline`, `pdf`, `gif`).
 pub fn save_bytes(doc: &Presentation, format: &str) -> Result<Vec<u8>> {
     match format {
@@ -532,7 +536,8 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn save_as(s: &mut Session, p: &Value) -> Result<Value> {
     if str_param(p, "path").is_none() {
-        s.ui_requests.push(crate::UiRequest::PickFile { purpose: "saveAs".into() });
+        // Save As without a path is a copy (Save As = Export): the UI shows its format list.
+        s.ui_requests.push(crate::UiRequest::PickFile { purpose: "saveAsCopy".into() });
         return Ok(json!({"needsPath": true}));
     }
     save(s, p)

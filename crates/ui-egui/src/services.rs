@@ -9,7 +9,16 @@ pub type PickFn = Box<dyn FnMut(&str) -> Option<String>>;
 /// not applied to whichever document happens to be active.
 pub type OpenAsyncFn = Box<dyn FnMut(&str, u64)>;
 
-pub type DownloadFn = Box<dyn FnMut(&str, &[u8])>;
+/// [`Services::download`]: `(file name, MIME type, bytes)`. An error means the browser didn't
+/// take the file; the app says so in the status bar.
+pub type DownloadFn = Box<dyn FnMut(&str, &str, &[u8]) -> Result<(), String>>;
+
+/// [`Services::confirm`]: ask the user a yes/no question (`true` = yes).
+pub type ConfirmFn = Box<dyn FnMut(&str) -> bool>;
+
+/// [`Services::pick_save_copy`]: `(suggested file name, filter name, extension)` → the path
+/// picked in the system Save dialog, or `None` when it was cancelled.
+pub type PickSaveCopyFn = Box<dyn FnMut(&str, &str, &str) -> Option<String>>;
 
 /// [`Services::host_save`]: `(file name, bytes, save_as, id)`. An error means the page didn't get
 /// the file, and the save failed. `id` is set when the page stores saves and answers each one
@@ -156,16 +165,23 @@ pub struct Services {
     /// Asynchronous open dialog (web). The callback receives the purpose and the request id
     /// from [`SlideApp::begin_external_file`]; the chosen file arrives through `inbox`.
     pub open_async: Option<OpenAsyncFn>,
-    /// Hand bytes to the user as a named file (browser download).
+    /// Desktop Save As / Export: the system Save dialog with one file type
+    /// ([`PickSaveCopyFn`]). Without it a copy uses [`Self::pick_save`] (no file type filter).
+    pub pick_save_copy: Option<PickSaveCopyFn>,
+    /// Hand bytes to the user as a named file (browser download, `craft_web_host::web::download`).
+    /// Every Save As and Export copy on the web goes here, also inside a page that keeps the files.
     pub download: Option<DownloadFn>,
+    /// Desktop: a yes/no question in a system message box, such as replacing the files of a
+    /// many-file export. Without it the app refuses instead of replacing anything.
+    pub confirm: Option<ConfirmFn>,
     /// Web, framed by a page that keeps the files (`?host=parent`): Save and Save As hand the
     /// presentation to that page instead of downloading it, with whether it is a new file
     /// ([`HostSaveFn`]). Save writes a presentation the page sent back under its own name and
     /// format, as the desktop app writes back to the file it opened; a presentation the page
     /// never sent (an untitled one, a repaired copy) goes as a new `.deckcraft` file, as Save
-    /// suggests on the desktop. Save As (.pptx or .deckcraft) is always a new file. Either way the
-    /// presentation is then that file, and the next Save goes to it. Exports and Print still go
-    /// through `download`, which the host also points at the page: they are copies.
+    /// suggests on the desktop. Either way the
+    /// presentation is then that file, and the next Save goes to it. Save As, the exports and
+    /// Print never come here: they are copies and download ([`Self::download`]).
     pub host_save: Option<HostSaveFn>,
     /// Whether the page stores saves and answers each, and its answers ([`HostSaves`]). The
     /// presentation then counts as saved only when the page's `saved` for that save arrives.
@@ -189,9 +205,6 @@ pub struct Services {
     /// are off. Tried before `download` and the Save dialog; an error keeps the copy waiting. A
     /// copy the page answers is kept until its `saved` arrives; on `save-failed` it waits again.
     pub save_copy: Option<SaveCopyFn>,
-    /// A browser download that does not go through the page: where a copy goes once the page
-    /// could not store one.
-    pub download_copy: Option<DownloadFn>,
     /// Desktop: where Share goes for the active presentation's file ([`ShareRouteFn`]). Without
     /// it (the web build, tests) a file on this computer is not connected to Nextcloud.
     pub share_route: Option<ShareRouteFn>,

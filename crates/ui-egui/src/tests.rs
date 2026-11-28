@@ -47,7 +47,8 @@ fn a_trackpad_twist_rotates_the_shape_under_the_canvas() {
     assert!((shape_rot(harness.state()) - 0.0).abs() < 0.01, "one undo, got {}", shape_rot(harness.state()));
 }
 
-/// The browser "PNG images (all slides)" export yields one image per slide, not just the selected one (#64).
+/// The browser "PNG images (all slides)" export yields one image per slide, not just the selected
+/// one (#64), named with craft-share's numbers.
 #[test]
 fn web_export_all_slides_gives_one_file_per_slide() {
     let mut doc = deckcraft_model::Presentation::default();
@@ -56,12 +57,24 @@ fn web_export_all_slides_gives_one_file_per_slide() {
         doc.slides.push(first);
     }
     assert_eq!(doc.slides.len(), 3);
-    let all = web_image_files(&doc, 1, true, "Deck", "png", false);
-    let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, ["Deck1.png", "Deck2.png", "Deck3.png"]);
-    let one = web_image_files(&doc, 1, false, "Deck", "png", false);
-    assert_eq!(one.len(), 1);
-    assert_eq!(one[0].0, "Deck.png");
+    assert_eq!(web_image_files(&doc, 1, true, "png", false).len(), 3);
+    assert_eq!(web_image_files(&doc, 1, false, "png", false).len(), 1);
+    let names = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let log = names.clone();
+    let services = Services {
+        download: Some(Box::new(move |n: &str, _: &str, _: &[u8]| {
+            log.borrow_mut().push(n.into());
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let mut app = SlideApp::new(Session::with_new(), services);
+    app.session.active_mut().unwrap().path = Some("Deck.pptx".into());
+    app.session.execute("slide.new", &json!({})).unwrap();
+    app.session.execute("slide.new", &json!({})).unwrap();
+    assert!(app.save_as_copy("pngAll", json!({})));
+    assert!(app.save_as_copy("png", json!({})));
+    assert_eq!(*names.borrow(), ["Deck-1.png", "Deck-2.png", "Deck-3.png", "Deck.png"]);
 }
 
 /// The web PNG download honours "Transparent background" (#784): the slide background is
@@ -73,14 +86,17 @@ fn web_png_export_can_leave_the_background_transparent() {
     let got: Rc<RefCell<Vec<(String, Vec<u8>)>>> = Rc::default();
     let log = got.clone();
     let services = Services {
-        download: Some(Box::new(move |name: &str, b: &[u8]| log.borrow_mut().push((name.to_string(), b.to_vec())))),
+        download: Some(Box::new(move |name: &str, _: &str, b: &[u8]| {
+            log.borrow_mut().push((name.to_string(), b.to_vec()));
+            Ok(())
+        })),
         ..Default::default()
     };
     let mut app = SlideApp::new(Session::with_new(), services);
     let corner_alpha = |bytes: &[u8]| deckcraft_render::decode_image(bytes).unwrap().get_pixel(2, 2).0[3];
-    assert!(app.export_as("png", json!({})));
-    assert!(app.export_as("png", json!({"transparentBackground": true})));
-    assert!(app.export_as("jpeg", json!({"transparentBackground": true})));
+    assert!(app.save_as_copy("png", json!({})));
+    assert!(app.save_as_copy("png", json!({"transparentBackground": true})));
+    assert!(app.save_as_copy("jpeg", json!({"transparentBackground": true})));
     let got = got.borrow();
     assert_eq!(got.len(), 3);
     assert_eq!(corner_alpha(&got[0].1), 255, "opaque by default");
@@ -88,7 +104,7 @@ fn web_png_export_can_leave_the_background_transparent() {
     assert_eq!(corner_alpha(&got[2].1), 255, "JPEG has no transparency");
 }
 
-/// Every type File › Save As and Export › Change File Type list is one `export_as` writes:
+/// Every type File › Save As and Export › Change File Type list is one `save_as_copy` writes:
 /// a listed type it doesn't know would only say "can't export" (#2019).
 #[test]
 fn every_listed_save_type_exports() {
@@ -96,15 +112,21 @@ fn every_listed_save_type_exports() {
     use std::rc::Rc;
     let got: Rc<RefCell<Vec<String>>> = Rc::default();
     let log = got.clone();
-    let services = Services { download: Some(Box::new(move |name: &str, _: &[u8]| log.borrow_mut().push(name.to_string()))), ..Default::default() };
+    let services = Services {
+        download: Some(Box::new(move |name: &str, _: &str, _: &[u8]| {
+            log.borrow_mut().push(name.to_string());
+            Ok(())
+        })),
+        ..Default::default()
+    };
     let mut app = SlideApp::new(Session::with_new(), services);
     app.session.execute("slide.new", &json!({})).unwrap();
-    for (id, _, _) in crate::backstage::SAVE_TYPES {
-        assert!(app.export_as(id, json!({})), "{id} exports");
+    for f in crate::SAVE_AS.formats() {
+        assert!(app.save_as_copy(f.id, json!({})), "{} exports", f.id);
     }
     let title = app.session.active().unwrap().title();
     let got = got.borrow();
-    for name in [format!("{title}1.jpg"), format!("{title}2.jpg"), format!("{title}1.png"), format!("{title}2.png")] {
+    for name in [format!("{title}-1.jpg"), format!("{title}-2.jpg"), format!("{title}-1.png"), format!("{title}-2.png")] {
         assert!(got.contains(&name), "{name} downloaded, got {got:?}");
     }
 }

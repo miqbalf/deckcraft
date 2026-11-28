@@ -707,25 +707,33 @@ fn dlg_rename_section(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     ok || cancel
 }
 
-/// Export…: the format (PDF, PNG or JPEG of the current slide or of every slide, PowerPoint,
-/// outline, animated GIF, RTF) and its options; Export hands them to [`SlideApp::export_as`].
+/// The Export… dialog's formats, (id, label): every [`crate::SAVE_AS`] format, in the dialog's own
+/// order and with its own labels; the formats it didn't list before keep the list's label.
+pub(crate) fn export_dialog_formats() -> Vec<(&'static str, &'static str)> {
+    const OWN: [(&str, &str); 9] = [
+        ("pdf", "PDF document (.pdf)"),
+        ("png", "PNG images (current slide)"),
+        ("pngAll", "PNG images (all slides)"),
+        ("jpeg", "JPEG image (current slide)"),
+        ("jpegAll", "JPEG images (all slides)"),
+        ("pptx", "PowerPoint Presentation (.pptx)"),
+        ("outline", "Outline (.txt)"),
+        ("gif", "Animated GIF (.gif)"),
+        ("rtf", "Outline/RTF (.rtf)"),
+    ];
+    let rest = crate::SAVE_AS.formats().iter().filter(|f| !OWN.iter().any(|(id, _)| *id == f.id)).map(|f| (f.id, f.label));
+    OWN.into_iter().filter(|(id, _)| crate::SAVE_AS.get(id).is_some()).chain(rest).collect()
+}
+
+/// Export…: the format (every one in [`crate::SAVE_AS`], the File › Save As list) and its options;
+/// Export hands them to [`SlideApp::save_as_copy`].
 /// Returns true when the dialog should close.
 fn dlg_export(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
     ui.label("Export the presentation as:");
     let fmt = d.get("fmt", "pdf");
-    for (l, f) in [
-        ("PDF document (.pdf)", "pdf"),
-        ("PNG images (current slide)", "png"),
-        ("PNG images (all slides)", "pngAll"),
-        ("JPEG image (current slide)", "jpeg"),
-        ("JPEG images (all slides)", "jpegAll"),
-        ("PowerPoint Presentation (.pptx)", "pptx"),
-        ("Outline (.txt)", "outline"),
-        ("Animated GIF (.gif)", "gif"),
-        ("Outline/RTF (.rtf)", "rtf"),
-    ] {
-        if ui.radio(fmt == f, l).clicked() {
-            d.fields.insert("fmt".into(), f.into());
+    for (id, label) in export_dialog_formats() {
+        if ui.radio(fmt == id, label).clicked() {
+            d.fields.insert("fmt".into(), id.into());
         }
     }
     let pdf_layout = d.get("pdfLayout", "slides");
@@ -807,7 +815,7 @@ fn dlg_export(app: &mut SlideApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             _ if png && d.get("pngTransparent", "false") == "true" => json!({"transparentBackground": true}),
             _ => json!({}),
         };
-        app.export_as(&fmt, extra);
+        app.save_as_copy(&fmt, extra);
     }
     ok || cancel
 }

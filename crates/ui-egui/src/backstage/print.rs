@@ -1,5 +1,4 @@
 use super::files::{place_row, square_button};
-use super::info::SAVE_TYPES;
 use super::{
     Align2, Backstage, Color32, CornerRadius, ExportTask, Icon, PrintScope, Rect, RichText, Sense, SlideApp, Stroke, StrokeKind, Tokens, Ui, Value,
     bullets, dim, heading, icon_button, json, pos2, theme, vec2,
@@ -283,7 +282,8 @@ fn preview(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage, doc: &deckcraft_
 }
 
 /// Export: tasks on the left (Create PDF Document, Create Handouts, Change File Type), the chosen
-/// one's description and button on the right. PowerPoint's video, animated GIF and CD package
+/// one's description and button on the right. Change File Type lists every
+/// other format DeckCraft writes ([`crate::SAVE_AS`]), the animated GIF too. PowerPoint's video and CD package
 /// exports aren't offered.
 pub(super) fn export(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage) {
     let t = Tokens::get(ui.ctx());
@@ -315,7 +315,7 @@ pub(super) fn export(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage) {
                     ui.checkbox(&mut bs.pdf_hidden, "Include hidden slides");
                     ui.add_space(10.0);
                     if square_button(ui, Icon::File, "Create PDF", true).clicked() {
-                        app.export_as("pdf", json!({"includeHidden": bs.pdf_hidden}));
+                        app.save_as_copy("pdf", json!({"includeHidden": bs.pdf_hidden}));
                     }
                 }
                 ExportTask::Handouts => {
@@ -334,14 +334,15 @@ pub(super) fn export(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage) {
                     combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Slides per page"));
                     ui.add_space(10.0);
                     if square_button(ui, Icon::Notes, "Create Handouts", true).clicked() {
-                        app.export_as("pdf", json!({"layout": "handouts", "perPage": bs.handouts_per_page}));
+                        app.save_as_copy("pdf", json!({"layout": "handouts", "perPage": bs.handouts_per_page}));
                     }
                 }
                 ExportTask::FileType => {
                     ui.label(RichText::new("Change File Type").font(theme::font(16.0)).color(t.text));
                     ui.add_space(8.0);
-                    for (id, label, detail) in SAVE_TYPES.iter().filter(|s| s.0 != "pdf") {
-                        let selected = bs.file_type == *id;
+                    for f in crate::SAVE_AS.formats().iter().filter(|f| f.id != "pdf") {
+                        let (id, label, detail) = (f.id, &f.label, &f.detail);
+                        let selected = bs.file_type == id;
                         let (rect, resp) = ui.allocate_exact_size(vec2(520.0, 46.0), Sense::click());
                         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, *label));
                         let p = ui.painter();
@@ -365,7 +366,7 @@ pub(super) fn export(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage) {
                     }
                     if square_button(ui, Icon::SaveAs, "Save As", true).clicked() {
                         let extra = if png && bs.png_transparent { json!({"transparentBackground": true}) } else { json!({}) };
-                        app.export_as(bs.file_type, extra);
+                        app.save_as_copy(bs.file_type, extra);
                     }
                 }
             }

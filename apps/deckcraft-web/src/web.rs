@@ -1,7 +1,7 @@
 //! The browser shell: web `Services`, drag-and-drop, and the eframe web runner.
 
 use deckcraft_engine::Session;
-use deckcraft_ui_egui::{Inbox, InboxEvent, InboxFile, Services, SlideApp};
+use deckcraft_ui_egui::{Inbox, InboxEvent, InboxFile, Services, SlideApp, download_mime, download_name};
 use wasm_bindgen::JsCast as _;
 
 const PRESENTATION_EXTS: &[&str] = &["deckcraft", "pptx", "potx", "ppsx", "ppt", "pot", "pps", "txt", "md"];
@@ -216,18 +216,15 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
                 ctx.request_repaint();
             });
         })),
-        write: Some(Box::new(|name: &str, bytes: &[u8]| download(name, bytes))),
-        download: Some(Box::new(|name: &str, bytes: &[u8]| {
-            if let Err(e) = download(name, bytes) {
-                log::error!("download of {name} failed: {e}");
-            }
+        write: Some(Box::new(|path: &str, bytes: &[u8]| {
+            let name = download_name(path);
+            craft_web_host::web::download(&name, download_mime(&name), bytes)
         })),
-        // The unmerged copy after the page failed to save it: always a browser download, also
-        // when the page takes the other saves.
-        download_copy: Some(Box::new(|name: &str, bytes: &[u8]| {
-            if let Err(e) = download(name, bytes) {
-                log::error!("download of {name} failed: {e}");
-            }
+        // Every Save As / Export copy, framed by a page that keeps the files or not: a download,
+        // never a message to the page, as is a copy of unmerged live edits the page could not
+        // store. A failure is shown in the status bar.
+        download: Some(Box::new(|name: &str, mime: &str, bytes: &[u8]| {
+            craft_web_host::web::download(&download_name(name), mime, bytes).inspect_err(|e| log::error!("download of {name} failed: {e}"))
         })),
         inbox: Some(inbox),
         ..Default::default()
@@ -236,44 +233,4 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
 
 fn push_inbox(inbox: &Inbox, event: InboxEvent) {
     inbox.lock().unwrap_or_else(|e| e.into_inner()).push(event);
-}
-
-/// Trigger a browser download of `bytes` named after the last component of `path`.
-fn download(path: &str, bytes: &[u8]) -> Result<(), String> {
-    let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "deckcraft".into());
-    let window = web_sys::window().ok_or("no window")?;
-    let document = window.document().ok_or("no document")?;
-    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
-    let opts = web_sys::BlobPropertyBag::new();
-    opts.set_type(mime_for(&name));
-    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts).map_err(js)?;
-    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(js)?;
-    let a: web_sys::HtmlAnchorElement = document.create_element("a").map_err(js)?.dyn_into().map_err(|_| "not an anchor")?;
-    a.set_href(&url);
-    a.set_download(&name);
-    a.style().set_property("display", "none").map_err(js)?;
-    let body = document.body().ok_or("no body")?;
-    body.append_child(&a).map_err(js)?;
-    a.click();
-    a.remove();
-    // Revoke after the click has been dispatched; the download keeps its own reference.
-    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
-        web_sys::Url::revoke_object_url(&url).ok();
-    });
-    window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000).map_err(js)?;
-    Ok(())
-}
-
-fn mime_for(name: &str) -> &'static str {
-    match name.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("pdf") => "application/pdf",
-        Some("gif") => "image/gif",
-        Some("txt") => "text/plain",
-        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        Some("deckcraft") => "application/zip",
-        _ => "application/octet-stream",
-    }
 }

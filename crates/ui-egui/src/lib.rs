@@ -70,10 +70,12 @@ mod ime_hooks;
 pub mod panels;
 mod services;
 mod state;
+mod web_host;
+pub use web_host::{HostHooks, connect_host, download_mime, download_name};
 
-pub use app::key_name;
 #[cfg(test)]
 use app::{OBJECTS_MARKER, system_clipboard_text, web_image_files};
+pub use app::{SAVE_AS, key_name};
 use canvas::preview;
 pub use canvas::squiggles;
 pub use clock::{monotonic_secs, now_ms};
@@ -89,8 +91,8 @@ pub use panels::selpane;
 pub use panels::thumbs;
 pub use ribbon::qat;
 pub use services::{
-    DownloadFn, HostAnswer, HostSaveFn, HostSaves, HostShareFn, HostShares, Inbox, InboxEvent, InboxFile, OpenAsyncFn, PickFn, ReadFn, SaveCopyFn,
-    Services, ShareRouteFn, WriteFn,
+    ConfirmFn, DownloadFn, HostAnswer, HostSaveFn, HostSaves, HostShareFn, HostShares, Inbox, InboxEvent, InboxFile, OpenAsyncFn, PickFn,
+    PickSaveCopyFn, ReadFn, SaveCopyFn, Services, ShareRouteFn, WriteFn,
 };
 use state::{FilePlace, FilePurpose, ImeDescriptorKey, ImeDestination, ImeTerminalStamp};
 pub use state::{RECENT_MAX, UiState, ViewMode, ZOOM_RANGE};
@@ -167,7 +169,7 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("app.insertAudioDialog", "Audio from File…", None, "{}"),
     ("app.reuseSlidesDialog", "Reuse Slides…", None, "{keepFormatting?: bool}"),
     ("app.insertVideoDialog", "Video from File…", None, "{}"),
-    ("app.saveAsDialog", "Save As…", None, "{}"),
+    ("app.saveAsDialog", "Save As…", None, "{format?: pptx|deckcraft|pdf|outline|rtf|png|jpeg|pngAll|jpegAll|gif, all?} → a copy"),
     ("app.exportDialog", "Export…", None, "{}"),
     ("file.share", "Share", None, "{} → {route: nextcloudWeb|nextcloudDesktop|none, url?, message?}"),
     ("app.browseThemeDialog", "Browse for Themes…", None, "{}"),
@@ -527,6 +529,8 @@ mod reflection_pane_tests;
 mod replacefonts_tests;
 #[cfg(test)]
 mod reuse_picker_tests;
+#[cfg(test)]
+mod save_as_tests;
 #[cfg(test)]
 mod share_hook_tests;
 #[cfg(test)]

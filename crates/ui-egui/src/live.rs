@@ -674,15 +674,16 @@ impl SlideApp {
                 }
             };
         }
-        if self.page_refused_copy
-            && let Some(download) = self.services.download_copy.as_mut()
-        {
-            download(name, bytes);
-            return true;
-        }
+        // A browser download, never the page (`Services::download`): also once the page could
+        // not store the copy.
         if let Some(download) = self.services.download.as_mut() {
-            download(name, bytes);
-            return true;
+            return match download(name, crate::web_host::download_mime(name), bytes) {
+                Ok(()) => true,
+                Err(e) => {
+                    self.set_status(e);
+                    false
+                }
+            };
         }
         let Some(path) = self.services.pick_save.as_mut().and_then(|pick| pick(name)) else {
             self.set_status(tr(deckcraft_live::UNMERGED_TEXT));

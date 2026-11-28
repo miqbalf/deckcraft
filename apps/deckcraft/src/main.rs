@@ -148,6 +148,20 @@ fn services(native_wayland: bool) -> Services {
             d.pick_file().map(|p| p.to_string_lossy().to_string())
         })),
         pick_save: Some(Box::new(|name: &str| rfd::FileDialog::new().set_file_name(name).save_file().map(|p| p.to_string_lossy().to_string()))),
+        // Save As = Export: the Save dialog with the copy's one file type.
+        pick_save_copy: Some(Box::new(|name: &str, filter: &str, ext: &str| {
+            rfd::FileDialog::new().set_file_name(name).add_filter(filter, &[ext]).save_file().map(|p| p.to_string_lossy().to_string())
+        })),
+        // A yes/no question in a system message box (replacing a many-file export's files).
+        confirm: Some(Box::new(|question: &str| {
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Warning)
+                .set_title("DeckCraft")
+                .set_description(question)
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show()
+                == rfd::MessageDialogResult::Yes
+        })),
         read: Some(Box::new(|p: &str| std::fs::read(p).map_err(|e| e.to_string()))),
         write: Some(Box::new(|p: &str, b: &[u8]| std::fs::write(p, b).map_err(|e| e.to_string()))),
         clipboard_image: pasteboard.then(|| Box::new(pasteboard::image_png) as Box<dyn FnMut() -> Option<Vec<u8>>>),

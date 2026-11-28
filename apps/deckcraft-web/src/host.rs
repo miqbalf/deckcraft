@@ -14,22 +14,23 @@
 //!   desktop: a presentation sent with its name (.pptx, .potx, .ppsx, .deckcraft) has that name
 //!   as its file, so Save goes back to it; an outline (.txt, .md, .rtf), a file without a name and
 //!   a damaged file open untitled.
-//! - `deckcraft:save` (to the host): `{ name, saveAs, bytes }` (with the bytes as a transferred `ArrayBuffer` over `postMessage`) for
-//!   every file DeckCraft would otherwise download. The host stores it and reports failures
-//!   itself. `saveAs` says whether the file becomes the presentation's file:
-//!   - Save: `false`. It writes the opened file under its own name and format (a .pptx stays a
-//!     .pptx), as the desktop app does. A name the parent never sent (an untitled presentation, an
+//! - `deckcraft:save` (to the host): `{ name, saveAs, bytes }` (with the bytes as a transferred
+//!   `ArrayBuffer` over `postMessage`) for Save only. The host stores it and reports failures
+//!   itself. `saveAs` says whether the file is a new one:
+//!   - `false`: Save of the opened file. It writes it under its own name and format (a .pptx stays
+//!     a .pptx), as the desktop app does.
+//!   - `true`: Save of a presentation with no file the parent sent (an untitled presentation, an
 //!     outline, a file sent without a name, a repaired copy of a damaged file, a file the user
-//!     picked or dropped) is a new file: `true`, as for Save As, named `<title>.deckcraft` as
-//!     Save suggests on the desktop.
-//!   - Save As (File › Save As as .pptx or .deckcraft, Ctrl+Shift+S): `true`. The presentation is
-//!     now that file; the next Save sends its name with `false`.
-//!   - Export (PDF, pictures, outline, GIF, handouts, a Save As type that isn't a presentation)
-//!     and Print: `false`. They are copies; the presentation's file stays the same.
+//!     picked or dropped), named `<title>.deckcraft` as Save suggests on the desktop. The
+//!     presentation is then that file; the next Save sends its name with `false`.
+//!
+//!   Save As, Export (PDF, pictures, outline, GIF, handouts, .pptx, .deckcraft) and Print are
+//!   copies: they download to the user's computer (`craft_web_host::web::download`) and are never
+//!   posted to the host, so they never create or change a file there.
 //! - `deckcraft:host` with `saves: true` (from the host): the host stores saves and answers each.
-//!   `deckcraft:save` then carries an `id` (for exports and Print too), the presentation counts as
+//!   `deckcraft:save` then carries an `id`, the presentation counts as
 //!   saved only on `deckcraft:saved { id, name? }` (a `name` is its file from then on: a conflict
-//!   copy, Save As), and on `deckcraft:save-failed { id, error }` it stays unsaved with "Couldn't
+//!   copy), and on `deckcraft:save-failed { id, error }` it stays unsaved with "Couldn't
 //!   save to Nextcloud: {error}". Without `saves` nothing changes: a file handed over counts as
 //!   saved at once.
 //! - `deckcraft:host` with `share: true` (from the host): the host opens Nextcloud's own sharing
@@ -86,7 +87,7 @@ use craft_web_host::Mode;
 use craft_web_host::live::{LiveMessage, LiveState, LiveStatus as HostStatus, Peer as HostPeer};
 use craft_web_host::web::{FileData, Host, Message, fetch_font};
 use deckcraft_live::{BaseFile, DeckLive, LiveFail};
-use deckcraft_ui_egui::{HostAnswer, HostSaves, HostShares, Services, SlideApp};
+use deckcraft_ui_egui::{HostAnswer, HostHooks, HostSaves, HostShares, Services, SlideApp, connect_host};
 use wasm_bindgen::{JsCast as _, JsValue};
 
 use crate::live_ticket::{Joining, Next};
@@ -152,35 +153,25 @@ impl Bridge {
         })
     }
 
-    /// Hand saved and exported files to the host instead of downloading them, and hear the files
-    /// it sends.
+    /// Hand saves to the host instead of downloading them, and hear the files it sends. Save As,
+    /// exports and Print keep the web shell's download: they are copies.
     pub fn connect(&self, services: &mut Services, ctx: egui::Context) {
         self.listen(ctx);
-        // The app and the listener share one answer queue.
-        services.host_saves = self.saves.clone();
-        let bridge = self.clone();
-        services.host_save =
-            Some(Box::new(move |name: &str, bytes: &[u8], save_as: bool, id: Option<&str>| bridge.post_save(name, bytes, save_as, id)));
+        // Which messages reach the page is decided (and tested natively) in `connect_host`: plain
+        // Save and Share only. The app and the listener share the answer queue and the share flag.
+        let (save, share) = (self.clone(), self.clone());
+        connect_host(
+            services,
+            HostHooks {
+                post_save: Box::new(move |name: &str, bytes: &[u8], save_as: bool, id: Option<&str>| save.post_save(name, bytes, save_as, id)),
+                post_share: Box::new(move || share.host.post_share()),
+                saves: self.saves.clone(),
+                shares: self.shares.clone(),
+            },
+        );
         // The copy of unmerged edits is a new file, also while live (Ruling D18).
         let bridge = self.clone();
         services.save_copy = Some(Box::new(move |name: &str, bytes: &[u8]| bridge.post_copy(name, bytes)));
-        // Share (`file.share`): a host that said `share: true` opens Nextcloud's sharing for the
-        // file it opened (`deckcraft:share`); otherwise the app says no Nextcloud is connected.
-        services.host_shares = self.shares.clone();
-        let bridge = self.clone();
-        services.host_share = Some(Box::new(move || bridge.host.post_share()));
-        // Exports and Print are copies: the host answers them too, so a failure is shown.
-        let bridge = self.clone();
-        services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
-            let id = bridge.saves.copy_id();
-            if let Err(e) = bridge.post_save(name, bytes, false, id.as_deref()) {
-                log::error!("couldn't hand {name} to the page: {e}");
-                if let Some(id) = id {
-                    // No answer will come: say so now.
-                    bridge.saves.answer(HostAnswer::Failed { id, error: e });
-                }
-            }
-        }));
     }
 
     /// `?author=`: the host's name for the user signs new comments.
