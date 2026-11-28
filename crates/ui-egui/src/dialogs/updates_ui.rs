@@ -86,8 +86,25 @@ mod tests {
         let mut app = SlideApp::new(deckcraft_engine::Session::new(), crate::Services::default());
         let ctx = egui::Context::default();
         assert!(!app.updates_rt.updater.prompt_open());
-        app.updates_rt.updater.offer(craft_update::Release { tag: "v99.0.0".into(), ..Default::default() });
-        ctx.run_ui(egui::RawInput::default(), |ui| show(&mut app, ui.ctx())).textures_delta.clear();
+        app.updates_rt.updater.offer(craft_update::Release {
+            tag: "v99.0.0".into(),
+            version: craft_update::parse_version("99.0.0"),
+            ..Default::default()
+        });
+        // craft-update reads on a thread whether this copy can install the release itself, and
+        // the prompt opens once `tick` picks up that answer.
+        for _ in 0..500 {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                tick(&mut app, ui.ctx());
+                show(&mut app, ui.ctx());
+            })
+            .textures_delta
+            .clear();
+            if app.updates_rt.updater.prompt_open() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(app.updates_rt.updater.prompt_open());
     }
 
